@@ -327,8 +327,34 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
     while i < len(lines):
         line = lines[i]
 
-        # ── Blank line → skip ──
+        # ── Blank line → empty text block (preserves paragraph spacing) ──
+        # Only insert an empty block between two text paragraphs to create
+        # visible spacing.  Blank lines after headings, lists, etc. are just
+        # Markdown syntax separators and should not produce extra blocks.
         if not line.strip():
+            if (blocks
+                    and blocks[-1].get("block_type") == BLOCK_TYPE_TEXT
+                    and blocks[-1].get("text", {}).get("elements", [{}])[0]
+                        .get("text_run", {}).get("content", "") != ""):
+                # Peek ahead: only add empty block if the next non-blank line
+                # is also a plain paragraph (text block).
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines):
+                    next_line = lines[j]
+                    is_next_paragraph = (
+                        next_line.strip()
+                        and not next_line.strip().startswith('#')
+                        and not next_line.strip().startswith('```')
+                        and not re.match(r'^[-*+]\s', next_line)
+                        and not re.match(r'^\d+\.\s', next_line)
+                        and not next_line.startswith('>')
+                        and not re.match(r'^(\s*[-*_]\s*){3,}$', next_line)
+                        and not re.match(r'^[-*]\s+\[[ xX]\]', next_line)
+                    )
+                    if is_next_paragraph:
+                        blocks.append(_make_text_block(BLOCK_TYPE_TEXT, ""))
             i += 1
             continue
 
