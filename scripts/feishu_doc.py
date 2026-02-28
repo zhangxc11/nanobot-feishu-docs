@@ -28,9 +28,22 @@ from md_to_blocks import markdown_to_blocks
 try:
     import lark_oapi as lark
     from lark_oapi.api.docx.v1 import *
+    from lark_oapi.api.drive.v1 import (
+        ListFileCommentRequest, PatchFileCommentRequest,
+        CreateFileCommentRequest, CreatePermissionMemberRequest,
+        FileComment as DriveFileComment, BaseMember,
+        ReplyContent, ReplyElement, TextRun as DriveTextRun,
+        FileCommentReply, ReplyList,
+    )
 except ImportError:
     print("ERROR: lark-oapi not installed. Run: pip install lark-oapi", file=sys.stderr)
     sys.exit(1)
+
+# For reply-comment we need requests (SDK lacks CreateFileCommentReply)
+try:
+    import requests as http_requests
+except ImportError:
+    http_requests = None
 
 
 # ── Config loading ────────────────────────────────────────────────────
@@ -488,6 +501,240 @@ def _block_to_dict(block) -> dict:
     return result
 
 
+# ── Comment operations ────────────────────────────────────────────────
+
+def _get_tenant_token(app_name: str = "ST") -> str:
+    """Get tenant_access_token via HTTP for APIs not covered by SDK."""
+    app_id, app_secret = load_feishu_credentials(app_name)
+    if http_requests is None:
+        print("ERROR: 'requests' library not available", file=sys.stderr)
+        sys.exit(1)
+    resp = http_requests.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        print(f"ERROR: Failed to get token: {data}", file=sys.stderr)
+        sys.exit(1)
+    return data["tenant_access_token"]
+
+
+def cmd_list_comments(args):
+    """List comments on a Feishu document."""
+    client = create_client(args.app)
+
+    request = ListFileCommentRequest.builder() \
+        .file_token(args.doc) \
+        .file_type("docx") \
+        .build()
+
+    response = client.drive.v1.file_comment.list(request)
+
+    if not response.success():
+        print(json.dumps({
+            "success": False,
+            "error": f"[{response.code}] {response.msg}"
+        }, ensure_ascii=False))
+        return 1
+
+    comments = []
+    if response.data and response.data.items:
+        for item in response.data.items:
+            comment = {
+                "comment_id": item.comment_id,
+                "is_solved": item.is_solved,
+                "quote": item.quote or "",
+                "replies": [],
+            }
+            if item.reply_list and item.reply_list.replies:
+                for reply in item.reply_list.replies:
+                    reply_text = ""
+                    if reply.content and reply.content.elements:
+                        parts = []
+                        for elem in reply.content.elements:
+                            if elem.type == "text_run" and elem.text_run:
+                                parts.append(elem.text_run.text or "")
+                        reply_text = "".join(parts)
+                    comment["replies"].append({
+                        "reply_id": reply.reply_id,
+                        "text": reply_text,
+                    })
+            # Apply status filter
+            if args.status == "solved" and not item.is_solved:
+                continue
+            if args.status == "unsolved" and item.is_solved:
+                continue
+            comments.append(comment)
+
+    result = {
+        "success": True,
+        "document_id": args.doc,
+        "comment_count": len(comments),
+        "comments": comments,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_reply_comment(args):
+    """Reply to a comment on a Feishu document.
+
+    Uses HTTP API directly because lark-oapi SDK lacks CreateFileCommentReply.
+    """
+    token = _get_tenant_token(args.app)
+
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/files/{args.doc}"
+        f"/comments/{args.comment}/replies"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "content": {
+            "elements": [{
+                "type": "text_run",
+                "text_run": {"text": args.text},
+            }]
+        }
+    }
+    resp = http_requests.post(url, headers=headers, json=body, params={"file_type": "docx"})
+    data = resp.json()
+
+    if data.get("code") == 0:
+        reply_data = data.get("data", {})
+        result = {
+            "success": True,
+            "document_id": args.doc,
+            "comment_id": args.comment,
+            "reply_id": reply_data.get("reply_id"),
+            "text": args.text,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    else:
+        print(json.dumps({
+            "success": False,
+            "error": f"[{data.get('code')}] {data.get('msg')}",
+        }, ensure_ascii=False))
+        return 1
+
+
+def cmd_resolve_comment(args):
+    """Mark a comment as resolved."""
+    client = create_client(args.app)
+
+    request = PatchFileCommentRequest.builder() \
+        .file_token(args.doc) \
+        .comment_id(args.comment) \
+        .file_type("docx") \
+        .request_body(DriveFileComment.builder().is_solved(True).build()) \
+        .build()
+
+    response = client.drive.v1.file_comment.patch(request)
+
+    if response.success():
+        print(json.dumps({
+            "success": True,
+            "document_id": args.doc,
+            "comment_id": args.comment,
+            "action": "resolved",
+        }, ensure_ascii=False, indent=2))
+        return 0
+    else:
+        print(json.dumps({
+            "success": False,
+            "error": f"[{response.code}] {response.msg}",
+        }, ensure_ascii=False))
+        return 1
+
+
+def cmd_add_comment(args):
+    """Add a new comment to a Feishu document.
+
+    Uses HTTP API directly for reliable quote + content handling.
+    """
+    token = _get_tenant_token(args.app)
+
+    url = f"https://open.feishu.cn/open-apis/drive/v1/files/{args.doc}/comments"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "reply_list": {
+            "replies": [{
+                "content": {
+                    "elements": [{
+                        "type": "text_run",
+                        "text_run": {"text": args.text},
+                    }]
+                }
+            }]
+        },
+    }
+    if args.quote:
+        body["quote"] = args.quote
+    if args.is_whole:
+        body["is_whole"] = True
+
+    resp = http_requests.post(url, headers=headers, json=body, params={"file_type": "docx"})
+    data = resp.json()
+
+    if data.get("code") == 0:
+        comment_data = data.get("data", {})
+        result = {
+            "success": True,
+            "document_id": args.doc,
+            "comment_id": comment_data.get("comment_id"),
+            "quote": args.quote or "(whole document)",
+            "text": args.text,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    else:
+        print(json.dumps({
+            "success": False,
+            "error": f"[{data.get('code')}] {data.get('msg')}",
+        }, ensure_ascii=False))
+        return 1
+
+
+def cmd_add_member(args):
+    """Add a collaborator to a Feishu document."""
+    client = create_client(args.app)
+
+    request = CreatePermissionMemberRequest.builder() \
+        .token(args.doc) \
+        .type("docx") \
+        .request_body(BaseMember.builder()
+            .member_type("openid")
+            .member_id(args.open_id)
+            .perm(args.perm)
+            .build()) \
+        .build()
+
+    response = client.drive.v1.permission_member.create(request)
+
+    if response.success():
+        print(json.dumps({
+            "success": True,
+            "document_id": args.doc,
+            "open_id": args.open_id,
+            "perm": args.perm,
+            "action": "member_added",
+        }, ensure_ascii=False, indent=2))
+        return 0
+    else:
+        print(json.dumps({
+            "success": False,
+            "error": f"[{response.code}] {response.msg}",
+        }, ensure_ascii=False))
+        return 1
+
+
 # ── CLI argument parsing ──────────────────────────────────────────────
 
 def main():
@@ -524,6 +771,37 @@ def main():
     caw_parser.add_argument("--markdown", help="Markdown content string")
     caw_parser.add_argument("--markdown-file", help="Path to Markdown file")
 
+    # list-comments
+    lc_parser = subparsers.add_parser("list-comments", help="List comments on a document")
+    lc_parser.add_argument("--doc", required=True, help="Document ID")
+    lc_parser.add_argument("--status", choices=["all", "solved", "unsolved"], default="all",
+                           help="Filter by status (default: all)")
+
+    # reply-comment
+    rc_parser = subparsers.add_parser("reply-comment", help="Reply to a comment")
+    rc_parser.add_argument("--doc", required=True, help="Document ID")
+    rc_parser.add_argument("--comment", required=True, help="Comment ID")
+    rc_parser.add_argument("--text", required=True, help="Reply text")
+
+    # resolve-comment
+    rsc_parser = subparsers.add_parser("resolve-comment", help="Mark a comment as resolved")
+    rsc_parser.add_argument("--doc", required=True, help="Document ID")
+    rsc_parser.add_argument("--comment", required=True, help="Comment ID")
+
+    # add-comment
+    ac_parser = subparsers.add_parser("add-comment", help="Add a new comment to a document")
+    ac_parser.add_argument("--doc", required=True, help="Document ID")
+    ac_parser.add_argument("--text", required=True, help="Comment text")
+    ac_parser.add_argument("--quote", default="", help="Quoted text from document")
+    ac_parser.add_argument("--is-whole", action="store_true", help="Comment on whole document")
+
+    # add-member
+    am_parser = subparsers.add_parser("add-member", help="Add a collaborator to a document")
+    am_parser.add_argument("--doc", required=True, help="Document ID")
+    am_parser.add_argument("--open-id", required=True, help="User open_id (ou_xxx)")
+    am_parser.add_argument("--perm", choices=["full_access", "edit", "view"],
+                           default="full_access", help="Permission level (default: full_access)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -536,6 +814,11 @@ def main():
         "write": cmd_write,
         "read": cmd_read,
         "create-and-write": cmd_create_and_write,
+        "list-comments": cmd_list_comments,
+        "reply-comment": cmd_reply_comment,
+        "resolve-comment": cmd_resolve_comment,
+        "add-comment": cmd_add_comment,
+        "add-member": cmd_add_member,
     }
 
     handler = commands.get(args.command)
