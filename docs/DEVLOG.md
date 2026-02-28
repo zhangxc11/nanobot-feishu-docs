@@ -65,6 +65,12 @@
 - add-comment 需要 `reply_list.replies` 结构包裹批注正文，`quote` 为引用文本
 - list-comments 返回的 reply content 是嵌套对象：`reply.content.elements[].text_run.text`
 
+#### Bug Fix: md_to_blocks 段落间空行 (commit a822714)
+- **问题**：Markdown 中两段纯文本之间的空行被忽略，飞书文档中两段紧贴
+- **原因**：`markdown_to_blocks()` 中空行被直接 `continue` 跳过
+- **修复**：空行在两个 text block 之间生成空 text block（前瞻判断下一个非空行是否为普通段落）
+- **验证**：29 项单元测试全部通过 + 飞书文档端到端验证
+
 ---
 
 *开始日期: 2026-02-28*
