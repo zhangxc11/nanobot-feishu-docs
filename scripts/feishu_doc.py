@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Optional, Tuple
 
 # Add current dir to path for md_to_blocks import
@@ -341,13 +342,19 @@ def _write_regular_blocks(client, doc_id: str, block_dicts: list) -> int:
     return total_written
 
 
-def _write_table_block(client, doc_id: str, table_dict: dict) -> bool:
+def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -> bool:
     """Create a table block in the document and fill cells with content.
 
     Feishu table creation is a two-step process:
     1. Create an empty table block (specifying row_size, column_size) via SDK
     2. The API returns the table block with pre-created cell block IDs
     3. Write content to each cell using HTTP API (SDK has JSON parse issues with cell writes)
+
+    Args:
+        client: Feishu API client
+        doc_id: Document ID
+        table_dict: Table block dict from markdown_to_blocks
+        index: Insert position (-1 = append to end)
 
     Returns True on success, False on failure.
     """
@@ -378,7 +385,7 @@ def _write_table_block(client, doc_id: str, table_dict: dict) -> bool:
         .request_body(
             CreateDocumentBlockChildrenRequestBody.builder()
             .children([table_block])
-            .index(-1)
+            .index(index)
             .build()
         ) \
         .build()
@@ -416,6 +423,7 @@ def _write_table_block(client, doc_id: str, table_dict: dict) -> bool:
     # Step 3: Write content to each cell via HTTP API
     # (SDK has JSON parsing issues with cell block children create response)
     token = _get_tenant_token()
+    failed_cells = []
 
     for row_idx, row in enumerate(rows):
         for col_idx, cell_content in enumerate(row):
@@ -461,18 +469,49 @@ def _write_table_block(client, doc_id: str, table_dict: dict) -> bool:
                 "index": 0
             }
 
-            try:
-                resp = http_requests.post(url, headers=headers, json=body)
-                if resp.status_code == 200 and resp.text:
-                    data = resp.json()
-                    if data.get("code") != 0:
-                        print(f"Warning: Failed to write cell [{row_idx},{col_idx}]: "
-                              f"[{data.get('code')}] {data.get('msg')}", file=sys.stderr)
-                elif resp.status_code != 200:
-                    print(f"Warning: HTTP {resp.status_code} writing cell [{row_idx},{col_idx}]",
+            # Retry with exponential backoff for rate limiting (HTTP 429)
+            max_retries = 5
+            success = False
+            for attempt in range(max_retries):
+                try:
+                    resp = http_requests.post(url, headers=headers, json=body)
+                    if resp.status_code == 200 and resp.text:
+                        data = resp.json()
+                        if data.get("code") == 0:
+                            success = True
+                            break
+                        elif data.get("code") == 99991400:
+                            # Rate limited by API (code-level throttle)
+                            wait = 0.5 * (2 ** attempt)
+                            print(f"Rate limited on cell [{row_idx},{col_idx}], "
+                                  f"retry {attempt+1}/{max_retries} after {wait:.1f}s",
+                                  file=sys.stderr)
+                            time.sleep(wait)
+                        else:
+                            print(f"Warning: Failed to write cell [{row_idx},{col_idx}]: "
+                                  f"[{data.get('code')}] {data.get('msg')}", file=sys.stderr)
+                            break  # Non-retryable error
+                    elif resp.status_code == 429:
+                        wait = 0.5 * (2 ** attempt)
+                        print(f"HTTP 429 on cell [{row_idx},{col_idx}], "
+                              f"retry {attempt+1}/{max_retries} after {wait:.1f}s",
+                              file=sys.stderr)
+                        time.sleep(wait)
+                    else:
+                        print(f"Warning: HTTP {resp.status_code} writing cell [{row_idx},{col_idx}]",
+                              file=sys.stderr)
+                        break  # Non-retryable error
+                except Exception as e:
+                    print(f"Warning: Exception writing cell [{row_idx},{col_idx}]: {e}",
                           file=sys.stderr)
-            except Exception as e:
-                print(f"Warning: Exception writing cell [{row_idx},{col_idx}]: {e}", file=sys.stderr)
+                    break
+
+            if not success:
+                failed_cells.append(f"[{row_idx},{col_idx}]")
+
+    if failed_cells:
+        print(f"Warning: {len(failed_cells)} cells failed to write: {', '.join(failed_cells)}",
+              file=sys.stderr)
 
     return True
 
@@ -1136,8 +1175,7 @@ def cmd_insert_blocks(args):
 
         elif seg_type == "table":
             # Table blocks are always appended at the end for now
-            # (inserting tables at specific index requires different API flow)
-            ok = _write_table_block(client, args.doc, seg_data)
+            ok = _write_table_block(client, args.doc, seg_data, index=current_index)
             if not ok:
                 return 1
             total_written += 1
