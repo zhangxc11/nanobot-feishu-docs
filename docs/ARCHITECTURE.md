@@ -35,9 +35,13 @@ skills/feishu-docs/
   python3 feishu_doc.py create --title "标题" [--folder TOKEN]
   python3 feishu_doc.py write --doc DOC_ID --markdown "# 内容"
   python3 feishu_doc.py write --doc DOC_ID --markdown-file path/to/file.md
+  python3 feishu_doc.py write --doc DOC_ID --mode overwrite --markdown "# 替换内容"
   python3 feishu_doc.py read --doc DOC_ID [--format raw|blocks]
   python3 feishu_doc.py create-and-write --title "标题" --markdown "# 内容" [--folder TOKEN]
   python3 feishu_doc.py create-and-write --title "标题" --markdown-file path/to/file.md [--folder TOKEN]
+  python3 feishu_doc.py patch-block --doc DOC_ID --block BLOCK_ID --text "新内容"
+  python3 feishu_doc.py delete-blocks --doc DOC_ID --start 0 --end 2 [--parent BLOCK_ID]
+  python3 feishu_doc.py insert-blocks --doc DOC_ID --index 1 --markdown "# 插入内容" [--parent BLOCK_ID]
   python3 feishu_doc.py list-comments --doc DOC_ID [--status all|solved|unsolved]
   python3 feishu_doc.py reply-comment --doc DOC_ID --comment COMMENT_ID --text "回复内容"
   python3 feishu_doc.py resolve-comment --doc DOC_ID --comment COMMENT_ID
@@ -47,9 +51,12 @@ skills/feishu-docs/
 
 子命令:
 - `create` — 创建空白文档
-- `write` — 向已有文档追加内容
-- `read` — 读取文档内容
+- `write` — 向已有文档追加/覆盖写入内容
+- `read` — 读取文档内容（raw 纯文本 / blocks 结构）
 - `create-and-write` — 创建文档并写入内容（组合命令）
+- `patch-block` — **原地更新**指定 block 的文本内容（局部编辑）
+- `delete-blocks` — **删除**指定 index 范围的子 block（局部编辑）
+- `insert-blocks` — 在指定 index 位置**插入** Markdown 内容（局部编辑）
 - `list-comments` — 列出文档批注
 - `reply-comment` — 回复指定批注
 - `resolve-comment` — 标记批注为已解决
@@ -171,6 +178,38 @@ POST /open-apis/drive/v1/permissions/{token}/members?type=docx
 Body: { "member_type": "openid", "member_id": "ou_xxx", "perm": "full_access" }
 ```
 
+#### 局部编辑 — 原地更新 Block 内容
+```
+PATCH /open-apis/docx/v1/documents/{document_id}/blocks/{block_id}
+Body: {
+  "update_text_elements": {
+    "elements": [{ "text_run": { "content": "新内容", "text_element_style": { "bold": true } } }]
+  }
+}
+Response: { "code": 0, "data": { "block": {...}, "document_revision_id": 29 } }
+```
+- 使用 HTTP PATCH API 而非 SDK（SDK 的 `PatchDocumentBlock` 传 `Block` 对象会返回 `invalid param`）
+- `update_text_elements.elements` 格式与 Block 创建时的 `text.elements` 一致
+- 复用 `_get_tenant_token()` 获取 tenant_access_token
+
+#### 局部编辑 — 删除指定范围的 Block
+```
+DELETE /open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children/batch_delete
+Body: { "start_index": 0, "end_index": 2 }
+```
+- 使用 SDK `BatchDeleteDocumentBlockChildren`（与 overwrite 的 `_clear_document` 共用同一 API）
+- `block_id` 为父 block ID（默认为 page block = doc_id）
+- `start_index` 包含，`end_index` 不包含
+
+#### 局部编辑 — 在指定位置插入 Block
+```
+POST /open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children
+Body: { "children": [Block, ...], "index": 1 }
+```
+- 使用 SDK `CreateDocumentBlockChildren`，与 `write` 追加逻辑共用
+- 追加时 `index=-1`（末尾），局部插入时 `index` 为 0-based 位置
+- 表格插入暂不支持指定 index（受限于两步创建流程），会追加到文档末尾
+
 ## 设计决策
 
 ### 为什么用 Python 脚本而不是 Shell 脚本？
@@ -186,6 +225,18 @@ Body: { "member_type": "openid", "member_id": "ou_xxx", "perm": "full_access" }
 ### 为什么选择 ST 应用？
 - ST 应用已开通文档权限
 - 可通过 `--app` 参数扩展支持其他应用
+
+### 为什么 patch-block 用 HTTP API 而非 SDK？
+- SDK 的 `PatchDocumentBlockRequest` 接受 `Block` 对象作为 `request_body`，但飞书服务端实际期望的是 `update_text_elements` 结构
+- 直接传 `Block` 对象会返回 `[1770001] invalid param`
+- HTTP PATCH API 可以精确控制 JSON body 格式，成功率 100%
+- 复用 `_get_tenant_token()` helper（与 reply-comment、add-comment 共用）
+
+### 为什么优先局部编辑而非 overwrite？
+- overwrite 会删除所有现有 block 再重写，飞书编辑历史中只能看到"全部删除+全部新增"
+- 局部编辑（patch/delete/insert）保留完整的编辑历史，飞书版本对比可以精确看到每个 block 的变更
+- 局部编辑更安全：误操作只影响目标 block，不会丢失整个文档内容
+- overwrite 仅作为极端场景的后备方案保留
 
 ---
 

@@ -112,18 +112,41 @@
 - SKILL.md 明确列出支持和不支持的 Markdown 语法
 - ARCHITECTURE.md 更新表格相关 API 说明
 
-### Phase 4: 高级功能（后续）
+### Phase 4: 局部编辑（Block 级别操作） ✅
 
-#### F4.1 编辑已有文档
-- 更新指定 Block 的内容
-- 在指定位置插入新 Block
-- 删除指定 Block
+> **设计原则**：修改已有文档时优先使用局部编辑，避免 overwrite 全量覆盖。overwrite 会丢失飞书编辑历史，无法查看修改前后对比。
 
-#### F4.2 电子表格操作
+#### F4.1 原地更新 Block 内容（patch-block） ✅
+- 通过 block_id 定位目标 block，原地更新其文本内容
+- 支持行内 Markdown 格式（bold, italic, code, link, strikethrough）
+- 适用于 text / heading / bullet / ordered 等文本类 block
+- 使用飞书 HTTP PATCH API（`update_text_elements`），SDK 的 PatchDocumentBlock 参数格式不兼容
+- 保留飞书完整编辑历史
+
+#### F4.2 删除指定范围的 Block（delete-blocks） ✅
+- 按 index 范围删除 page block 的子 block（start_index inclusive, end_index exclusive）
+- 支持指定 parent block（默认为 page block = doc_id）
+- 使用 SDK `BatchDeleteDocumentBlockChildren` API
+
+#### F4.3 在指定位置插入内容（insert-blocks） ✅
+- 在指定 index 位置插入 Markdown 内容（0-based，插入到该 index 之前）
+- 支持完整 Markdown 语法（含表格）
+- 支持 `--markdown` 和 `--markdown-file` 两种输入方式
+- 支持指定 parent block
+- 使用 SDK `CreateDocumentBlockChildren` 的 `index` 参数
+
+#### F4.4 推荐编辑工作流
+- 编辑前必须先 `read --format blocks` 获取文档结构（block ID + index）
+- 优先 patch-block（修改）→ delete-blocks（删除）→ insert-blocks（插入）
+- 仅在需要彻底重写整个文档时才使用 `write --mode overwrite`
+
+### Phase 5: 高级功能（后续）
+
+#### F5.1 电子表格操作
 - 创建电子表格
 - 读写单元格数据
 
-#### F4.3 多维表格操作
+#### F5.2 多维表格操作
 - 读写多维表格记录
 
 ## 技术约束
