@@ -940,6 +940,220 @@ def cmd_add_member(args):
         return 1
 
 
+# ── Block-level editing operations ────────────────────────────────────
+
+def cmd_patch_block(args):
+    """Update the text content of a specific block in-place.
+
+    This is the preferred way to edit documents — it preserves edit history
+    and only modifies the targeted block.
+    """
+    token = _get_tenant_token(args.app)
+
+    # Build text elements from markdown content
+    elements = _parse_inline_simple_import(args.text)
+    api_elements = []
+    for elem_dict in elements:
+        if "text_run" in elem_dict:
+            style = elem_dict["text_run"].get("text_element_style", {})
+            clean_style = {}
+            for k, v in style.items():
+                if v:
+                    clean_style[k] = v
+            api_elements.append({
+                "text_run": {
+                    "content": elem_dict["text_run"]["content"],
+                    "text_element_style": clean_style
+                }
+            })
+
+    url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{args.doc}/blocks/{args.block}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "update_text_elements": {
+            "elements": api_elements
+        }
+    }
+
+    try:
+        resp = http_requests.patch(url, headers=headers, json=body)
+        data = resp.json()
+    except Exception as e:
+        print(json.dumps({
+            "success": False,
+            "error": f"HTTP request failed: {e}"
+        }, ensure_ascii=False))
+        return 1
+
+    if data.get("code") == 0:
+        block_data = data.get("data", {}).get("block", {})
+        result = {
+            "success": True,
+            "document_id": args.doc,
+            "block_id": args.block,
+            "action": "patched",
+            "revision_id": data.get("data", {}).get("document_revision_id"),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    else:
+        print(json.dumps({
+            "success": False,
+            "error": f"[{data.get('code')}] {data.get('msg')}"
+        }, ensure_ascii=False))
+        return 1
+
+
+def cmd_delete_blocks(args):
+    """Delete a range of child blocks from a document.
+
+    Uses start_index and end_index (exclusive) relative to the parent block's children.
+    Typically the parent is the page block (doc_id itself).
+    """
+    client = create_client(args.app)
+
+    parent_id = args.parent or args.doc  # Default parent is the page block
+
+    del_request = BatchDeleteDocumentBlockChildrenRequest.builder() \
+        .document_id(args.doc) \
+        .block_id(parent_id) \
+        .request_body(
+            BatchDeleteDocumentBlockChildrenRequestBody.builder()
+            .start_index(args.start)
+            .end_index(args.end)
+            .build()
+        ) \
+        .build()
+
+    del_response = client.docx.v1.document_block_children.batch_delete(del_request)
+
+    if del_response.success():
+        result = {
+            "success": True,
+            "document_id": args.doc,
+            "parent_id": parent_id,
+            "deleted_range": f"[{args.start}, {args.end})",
+            "action": "deleted",
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    else:
+        print(json.dumps({
+            "success": False,
+            "error": f"[{del_response.code}] {del_response.msg}"
+        }, ensure_ascii=False))
+        return 1
+
+
+def cmd_insert_blocks(args):
+    """Insert markdown content at a specific index position in the document.
+
+    This allows inserting new content between existing blocks without
+    affecting the rest of the document.
+    """
+    client = create_client(args.app)
+
+    # Get markdown content
+    markdown = _get_markdown_content(args)
+    if markdown is None:
+        return 1
+
+    block_dicts = markdown_to_blocks(markdown)
+    if not block_dicts:
+        print(json.dumps({"success": False, "error": "No content to insert"}, ensure_ascii=False))
+        return 1
+
+    parent_id = args.parent or args.doc
+    index = args.index
+
+    # Split block_dicts into segments: consecutive regular blocks vs table blocks
+    segments = []
+    current_regular = []
+
+    for bd in block_dicts:
+        if bd.get("block_type") == BLOCK_TYPE_TABLE:
+            if current_regular:
+                segments.append(("regular", current_regular))
+                current_regular = []
+            segments.append(("table", bd))
+        else:
+            current_regular.append(bd)
+
+    if current_regular:
+        segments.append(("regular", current_regular))
+
+    total_written = 0
+    current_index = index
+
+    for seg_type, seg_data in segments:
+        if seg_type == "regular":
+            # Build Block objects
+            children = []
+            for bd in seg_data:
+                block = Block()
+                block.block_type = bd["block_type"]
+
+                for field_name in ["text", "heading1", "heading2", "heading3", "heading4",
+                                   "heading5", "heading6", "heading7", "heading8", "heading9",
+                                   "bullet", "ordered", "code", "quote", "todo", "divider"]:
+                    if field_name in bd:
+                        setattr(block, field_name, _dict_to_text(bd[field_name], field_name))
+                        break
+
+                children.append(block)
+
+            # Write in batches at the specified index
+            BATCH_SIZE = 50
+            for batch_start in range(0, len(children), BATCH_SIZE):
+                batch = children[batch_start:batch_start + BATCH_SIZE]
+
+                request = CreateDocumentBlockChildrenRequest.builder() \
+                    .document_id(args.doc) \
+                    .block_id(parent_id) \
+                    .request_body(
+                        CreateDocumentBlockChildrenRequestBody.builder()
+                        .children(batch)
+                        .index(current_index)
+                        .build()
+                    ) \
+                    .build()
+
+                response = client.docx.v1.document_block_children.create(request)
+
+                if not response.success():
+                    print(json.dumps({
+                        "success": False,
+                        "error": f"[{response.code}] {response.msg}",
+                        "blocks_written": total_written
+                    }, ensure_ascii=False))
+                    return 1
+
+                total_written += len(batch)
+                current_index += len(batch)
+
+        elif seg_type == "table":
+            # Table blocks are always appended at the end for now
+            # (inserting tables at specific index requires different API flow)
+            ok = _write_table_block(client, args.doc, seg_data)
+            if not ok:
+                return 1
+            total_written += 1
+            current_index += 1
+
+    result = {
+        "success": True,
+        "document_id": args.doc,
+        "blocks_inserted": total_written,
+        "at_index": index,
+        "url": f"https://feishu.cn/docx/{args.doc}"
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 # ── CLI argument parsing ──────────────────────────────────────────────
 
 def main():
@@ -1009,6 +1223,30 @@ def main():
     am_parser.add_argument("--perm", choices=["full_access", "edit", "view"],
                            default="full_access", help="Permission level (default: full_access)")
 
+    # patch-block (局部编辑 — 原地更新 block 内容)
+    pb_parser = subparsers.add_parser("patch-block",
+                                       help="Update a block's text content in-place")
+    pb_parser.add_argument("--doc", required=True, help="Document ID")
+    pb_parser.add_argument("--block", required=True, help="Block ID to update")
+    pb_parser.add_argument("--text", required=True, help="New text content (supports inline markdown)")
+
+    # delete-blocks (局部编辑 — 删除指定范围的 block)
+    db_parser = subparsers.add_parser("delete-blocks",
+                                       help="Delete a range of child blocks")
+    db_parser.add_argument("--doc", required=True, help="Document ID")
+    db_parser.add_argument("--start", required=True, type=int, help="Start index (inclusive)")
+    db_parser.add_argument("--end", required=True, type=int, help="End index (exclusive)")
+    db_parser.add_argument("--parent", help="Parent block ID (default: page block = doc_id)")
+
+    # insert-blocks (局部编辑 — 在指定位置插入内容)
+    ib_parser = subparsers.add_parser("insert-blocks",
+                                       help="Insert markdown content at a specific index")
+    ib_parser.add_argument("--doc", required=True, help="Document ID")
+    ib_parser.add_argument("--index", required=True, type=int, help="Insert position (0-based)")
+    ib_parser.add_argument("--markdown", help="Markdown content string")
+    ib_parser.add_argument("--markdown-file", help="Path to Markdown file")
+    ib_parser.add_argument("--parent", help="Parent block ID (default: page block = doc_id)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1026,6 +1264,9 @@ def main():
         "resolve-comment": cmd_resolve_comment,
         "add-comment": cmd_add_comment,
         "add-member": cmd_add_member,
+        "patch-block": cmd_patch_block,
+        "delete-blocks": cmd_delete_blocks,
+        "insert-blocks": cmd_insert_blocks,
     }
 
     handler = commands.get(args.command)
