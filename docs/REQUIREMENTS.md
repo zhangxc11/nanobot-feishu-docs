@@ -92,18 +92,38 @@
 - 为文档添加协作者（通过 open_id）
 - 支持设置权限级别（full_access / edit / view）
 
-### Phase 3: 高级功能（后续）
+### Phase 3: 覆盖写入 + 表格支持
 
-#### F3.1 编辑已有文档
+#### F3.1 write 命令覆盖模式
+- `write --doc DOC_ID --mode overwrite` — 先清空文档所有子 block，再写入新内容
+- 默认行为（`--mode append`）保持不变：追加到文档末尾
+- `create-and-write` 命令不需要 mode 参数（新文档本身为空）
+- 清空逻辑：调用 `BatchDeleteDocumentBlockChildren` API，传入 `start_index=0, end_index=子block数量`
+
+#### F3.2 Markdown 表格 → 飞书 Table Block
+- 解析标准 Markdown 表格语法（`| col1 | col2 |` + `|---|---|`）
+- 生成飞书 `table` block（block_type=31）
+- 表格属性：row_size, column_size, header_row=true
+- 单元格内容支持 inline 样式（bold, italic, code, link）
+- 飞书表格创建方式：先创建空 table block，再向每个 cell 写入内容
+
+#### F3.3 文档说明完善
+- SKILL.md 明确标注 write 命令默认为追加模式
+- SKILL.md 明确列出支持和不支持的 Markdown 语法
+- ARCHITECTURE.md 更新表格相关 API 说明
+
+### Phase 4: 高级功能（后续）
+
+#### F4.1 编辑已有文档
 - 更新指定 Block 的内容
 - 在指定位置插入新 Block
 - 删除指定 Block
 
-#### F3.2 电子表格操作
+#### F4.2 电子表格操作
 - 创建电子表格
 - 读写单元格数据
 
-#### F3.3 多维表格操作
+#### F4.3 多维表格操作
 - 读写多维表格记录
 
 ## 技术约束

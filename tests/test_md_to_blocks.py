@@ -17,7 +17,7 @@ from md_to_blocks import (
     _make_todo_block,
     BLOCK_TYPE_TEXT, BLOCK_TYPE_HEADING1, BLOCK_TYPE_HEADING2, BLOCK_TYPE_HEADING3,
     BLOCK_TYPE_BULLET, BLOCK_TYPE_ORDERED, BLOCK_TYPE_CODE, BLOCK_TYPE_QUOTE,
-    BLOCK_TYPE_TODO, BLOCK_TYPE_DIVIDER,
+    BLOCK_TYPE_TODO, BLOCK_TYPE_DIVIDER, BLOCK_TYPE_TABLE,
 )
 
 import unittest
@@ -272,6 +272,88 @@ class TestMakeTextRun(unittest.TestCase):
     def test_with_link(self):
         run = _make_text_run("click", link_url="https://example.com")
         self.assertEqual(run["text_run"]["text_element_style"]["link"]["url"], "https://example.com")
+
+
+class TestTableParsing(unittest.TestCase):
+    """Test Markdown table → table block dict conversion."""
+
+    def test_simple_table(self):
+        md = "| Name | Age |\n|---|---|\n| Alice | 30 |\n| Bob | 25 |"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_TABLE)
+        table = blocks[0]["table"]
+        self.assertEqual(table["column_size"], 2)
+        self.assertEqual(len(table["rows"]), 3)  # header + 2 data rows
+        self.assertEqual(table["rows"][0], ["Name", "Age"])
+        self.assertEqual(table["rows"][1], ["Alice", "30"])
+        self.assertEqual(table["rows"][2], ["Bob", "25"])
+        self.assertTrue(table["header_row"])
+
+    def test_table_with_3_columns(self):
+        md = "| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        table = blocks[0]["table"]
+        self.assertEqual(table["column_size"], 3)
+        self.assertEqual(len(table["rows"]), 2)
+
+    def test_table_with_surrounding_content(self):
+        md = "# Title\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nSome text after."
+        blocks = markdown_to_blocks(md)
+        types = [b["block_type"] for b in blocks]
+        self.assertIn(BLOCK_TYPE_HEADING1, types)
+        self.assertIn(BLOCK_TYPE_TABLE, types)
+        self.assertIn(BLOCK_TYPE_TEXT, types)
+
+    def test_table_uneven_columns(self):
+        """Data row with fewer columns than header should be padded."""
+        md = "| A | B | C |\n|---|---|---|\n| 1 |"
+        blocks = markdown_to_blocks(md)
+        table = blocks[0]["table"]
+        # Data row should be padded to 3 columns
+        self.assertEqual(len(table["rows"][1]), 3)
+        self.assertEqual(table["rows"][1][0], "1")
+        self.assertEqual(table["rows"][1][1], "")
+        self.assertEqual(table["rows"][1][2], "")
+
+    def test_table_with_inline_formatting(self):
+        """Table cells can contain inline formatting (handled at write time)."""
+        md = "| Name | Desc |\n|---|---|\n| **Bold** | `code` |"
+        blocks = markdown_to_blocks(md)
+        table = blocks[0]["table"]
+        self.assertEqual(table["rows"][1][0], "**Bold**")
+        self.assertEqual(table["rows"][1][1], "`code`")
+
+    def test_not_a_table_single_pipe_line(self):
+        """A single pipe line without separator should not be parsed as table."""
+        md = "| just a line |"
+        blocks = markdown_to_blocks(md)
+        # Should be parsed as regular text, not a table
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_TEXT)
+
+    def test_table_separator_only(self):
+        """Separator without header should not crash."""
+        md = "|---|---|\n| 1 | 2 |"
+        blocks = markdown_to_blocks(md)
+        # First line is separator → divider-like, not a table
+        # Should not crash regardless of parsing
+        self.assertTrue(len(blocks) >= 1)
+
+    def test_multiple_tables(self):
+        md = "| A | B |\n|---|---|\n| 1 | 2 |\n\n| X | Y |\n|---|---|\n| 3 | 4 |"
+        blocks = markdown_to_blocks(md)
+        table_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TABLE]
+        self.assertEqual(len(table_blocks), 2)
+
+    def test_table_with_alignment_markers(self):
+        """Separator with alignment markers (:---:, ---:, :---) should work."""
+        md = "| Left | Center | Right |\n|:---|:---:|---:|\n| a | b | c |"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_TABLE)
+        table = blocks[0]["table"]
+        self.assertEqual(table["column_size"], 3)
 
 
 if __name__ == "__main__":

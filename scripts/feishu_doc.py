@@ -23,7 +23,7 @@ from typing import Optional, Tuple
 
 # Add current dir to path for md_to_blocks import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from md_to_blocks import markdown_to_blocks
+from md_to_blocks import markdown_to_blocks, BLOCK_TYPE_TABLE, BLOCK_TYPE_TEXT
 
 try:
     import lark_oapi as lark
@@ -159,19 +159,147 @@ def cmd_write(args):
     if markdown is None:
         return 1
 
+    # If overwrite mode, clear existing content first
+    if hasattr(args, 'mode') and args.mode == 'overwrite':
+        clear_result = _clear_document(client, args.doc)
+        if clear_result != 0:
+            return clear_result
+
     # Convert markdown to blocks
     block_dicts = markdown_to_blocks(markdown)
     if not block_dicts:
         print(json.dumps({"success": False, "error": "No content to write"}), ensure_ascii=False)
         return 1
 
-    # Build Block objects from dicts
+    # Separate table blocks from regular blocks (tables need special handling)
+    return _write_blocks_to_doc(client, args.doc, block_dicts)
+
+
+def _clear_document(client, doc_id: str) -> int:
+    """Clear all child blocks from a document (for overwrite mode).
+
+    Returns 0 on success, 1 on failure.
+    """
+    # First, get the document's child blocks to know how many to delete
+    request = ListDocumentBlockRequest.builder() \
+        .document_id(doc_id) \
+        .page_size(500) \
+        .build()
+
+    response = client.docx.v1.document_block.list(request)
+
+    if not response.success():
+        print(json.dumps({
+            "success": False,
+            "error": f"Failed to list blocks for clear: [{response.code}] {response.msg}"
+        }, ensure_ascii=False))
+        return 1
+
+    if not response.data or not response.data.items:
+        return 0  # Document already empty
+
+    # Find the page block (block_type=1) — its children are the top-level blocks
+    page_block = None
+    for block in response.data.items:
+        if block.block_type == 1:
+            page_block = block
+            break
+
+    if not page_block or not page_block.children:
+        return 0  # No children to delete
+
+    child_count = len(page_block.children)
+    if child_count == 0:
+        return 0
+
+    # Delete all children in batches (API may have limits)
+    # BatchDelete uses start_index and end_index (exclusive)
+    BATCH_SIZE = 50
+    # Delete from the end to avoid index shifting issues
+    remaining = child_count
+    while remaining > 0:
+        delete_count = min(BATCH_SIZE, remaining)
+        del_request = BatchDeleteDocumentBlockChildrenRequest.builder() \
+            .document_id(doc_id) \
+            .block_id(doc_id) \
+            .request_body(
+                BatchDeleteDocumentBlockChildrenRequestBody.builder()
+                .start_index(0)
+                .end_index(delete_count)
+                .build()
+            ) \
+            .build()
+
+        del_response = client.docx.v1.document_block_children.batch_delete(del_request)
+
+        if not del_response.success():
+            print(json.dumps({
+                "success": False,
+                "error": f"Failed to clear document: [{del_response.code}] {del_response.msg}"
+            }, ensure_ascii=False))
+            return 1
+
+        remaining -= delete_count
+
+    return 0
+
+
+def _write_blocks_to_doc(client, doc_id: str, block_dicts: list) -> int:
+    """Write block dicts to a document, handling both regular blocks and tables.
+
+    Tables need special two-step creation:
+    1. Create empty table block with row_size/column_size
+    2. Fill each cell with content via descendant API
+
+    Returns exit code (0=success, 1=failure).
+    """
+    # Split block_dicts into segments: consecutive regular blocks vs table blocks
+    segments = []
+    current_regular = []
+
+    for bd in block_dicts:
+        if bd.get("block_type") == BLOCK_TYPE_TABLE:
+            if current_regular:
+                segments.append(("regular", current_regular))
+                current_regular = []
+            segments.append(("table", bd))
+        else:
+            current_regular.append(bd)
+
+    if current_regular:
+        segments.append(("regular", current_regular))
+
+    total_written = 0
+
+    for seg_type, seg_data in segments:
+        if seg_type == "regular":
+            count = _write_regular_blocks(client, doc_id, seg_data)
+            if count < 0:
+                return 1
+            total_written += count
+        elif seg_type == "table":
+            ok = _write_table_block(client, doc_id, seg_data)
+            if not ok:
+                return 1
+            total_written += 1
+
+    result = {
+        "success": True,
+        "document_id": doc_id,
+        "blocks_written": total_written,
+        "url": f"https://feishu.cn/docx/{doc_id}"
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _write_regular_blocks(client, doc_id: str, block_dicts: list) -> int:
+    """Write regular (non-table) blocks to document. Returns count written or -1 on error."""
     children = []
     for bd in block_dicts:
         block = Block()
         block.block_type = bd["block_type"]
 
-        # Find the content field (text, heading1, bullet, etc.)
         for field_name in ["text", "heading1", "heading2", "heading3", "heading4",
                            "heading5", "heading6", "heading7", "heading8", "heading9",
                            "bullet", "ordered", "code", "quote", "todo", "divider"]:
@@ -181,7 +309,6 @@ def cmd_write(args):
 
         children.append(block)
 
-    # Write blocks in batches (API limit: max 50 blocks per request)
     BATCH_SIZE = 50
     total_written = 0
 
@@ -189,8 +316,8 @@ def cmd_write(args):
         batch = children[batch_start:batch_start + BATCH_SIZE]
 
         request = CreateDocumentBlockChildrenRequest.builder() \
-            .document_id(args.doc) \
-            .block_id(args.doc) \
+            .document_id(doc_id) \
+            .block_id(doc_id) \
             .request_body(
                 CreateDocumentBlockChildrenRequestBody.builder()
                 .children(batch)
@@ -207,18 +334,153 @@ def cmd_write(args):
                 "error": f"[{response.code}] {response.msg}",
                 "blocks_written": total_written
             }, ensure_ascii=False))
-            return 1
+            return -1
 
         total_written += len(batch)
 
-    result = {
-        "success": True,
-        "document_id": args.doc,
-        "blocks_written": total_written,
-        "url": f"https://feishu.cn/docx/{args.doc}"
-    }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    return total_written
+
+
+def _write_table_block(client, doc_id: str, table_dict: dict) -> bool:
+    """Create a table block in the document and fill cells with content.
+
+    Feishu table creation is a two-step process:
+    1. Create an empty table block (specifying row_size, column_size) via SDK
+    2. The API returns the table block with pre-created cell block IDs
+    3. Write content to each cell using HTTP API (SDK has JSON parse issues with cell writes)
+
+    Returns True on success, False on failure.
+    """
+    table_data = table_dict.get("table", {})
+    rows = table_data.get("rows", [])
+    row_count = len(rows)
+    col_count = table_data.get("column_size", 0)
+
+    if row_count == 0 or col_count == 0:
+        return True  # Skip empty tables
+
+    # Step 1: Create empty table block via SDK
+    table_block = Block()
+    table_block.block_type = BLOCK_TYPE_TABLE
+
+    table_prop = TableProperty()
+    table_prop.row_size = row_count
+    table_prop.column_size = col_count
+
+    table_obj = Table()
+    table_obj.property = table_prop
+
+    table_block.table = table_obj
+
+    request = CreateDocumentBlockChildrenRequest.builder() \
+        .document_id(doc_id) \
+        .block_id(doc_id) \
+        .request_body(
+            CreateDocumentBlockChildrenRequestBody.builder()
+            .children([table_block])
+            .index(-1)
+            .build()
+        ) \
+        .build()
+
+    response = client.docx.v1.document_block_children.create(request)
+
+    if not response.success():
+        print(json.dumps({
+            "success": False,
+            "error": f"Table create failed: [{response.code}] {response.msg}"
+        }, ensure_ascii=False), file=sys.stderr)
+        return False
+
+    # Step 2: Get cell block IDs from response
+    created_blocks = response.data.children if response.data else []
+    if not created_blocks:
+        print("Warning: Table created but no block data returned", file=sys.stderr)
+        return True
+
+    table_resp_block = None
+    for cb in created_blocks:
+        if cb.block_type == BLOCK_TYPE_TABLE:
+            table_resp_block = cb
+            break
+
+    if not table_resp_block or not table_resp_block.table:
+        print("Warning: Table block not found in response", file=sys.stderr)
+        return True
+
+    cell_ids = table_resp_block.table.cells or []
+
+    if len(cell_ids) != row_count * col_count:
+        print(f"Warning: Expected {row_count * col_count} cells, got {len(cell_ids)}", file=sys.stderr)
+
+    # Step 3: Write content to each cell via HTTP API
+    # (SDK has JSON parsing issues with cell block children create response)
+    token = _get_tenant_token()
+
+    for row_idx, row in enumerate(rows):
+        for col_idx, cell_content in enumerate(row):
+            cell_flat_idx = row_idx * col_count + col_idx
+            if cell_flat_idx >= len(cell_ids):
+                break
+
+            cell_block_id = cell_ids[cell_flat_idx]
+
+            if not cell_content.strip():
+                continue  # Skip empty cells
+
+            # Build text elements with inline formatting
+            elements = _parse_inline_simple_import(cell_content.strip())
+            api_elements = []
+            for elem_dict in elements:
+                if "text_run" in elem_dict:
+                    style = elem_dict["text_run"].get("text_element_style", {})
+                    # Only include non-empty style fields for API compatibility
+                    clean_style = {}
+                    for k, v in style.items():
+                        if v:  # Skip False, None, empty values
+                            clean_style[k] = v
+                    api_elements.append({
+                        "text_run": {
+                            "content": elem_dict["text_run"]["content"],
+                            "text_element_style": clean_style
+                        }
+                    })
+
+            url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{cell_block_id}/children"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+            body = {
+                "children": [{
+                    "block_type": 2,
+                    "text": {
+                        "elements": api_elements
+                    }
+                }],
+                "index": 0
+            }
+
+            try:
+                resp = http_requests.post(url, headers=headers, json=body)
+                if resp.status_code == 200 and resp.text:
+                    data = resp.json()
+                    if data.get("code") != 0:
+                        print(f"Warning: Failed to write cell [{row_idx},{col_idx}]: "
+                              f"[{data.get('code')}] {data.get('msg')}", file=sys.stderr)
+                elif resp.status_code != 200:
+                    print(f"Warning: HTTP {resp.status_code} writing cell [{row_idx},{col_idx}]",
+                          file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: Exception writing cell [{row_idx},{col_idx}]: {e}", file=sys.stderr)
+
+    return True
+
+
+def _parse_inline_simple_import(text: str):
+    """Import and call _parse_inline_simple from md_to_blocks."""
+    from md_to_blocks import _parse_inline_simple
+    return _parse_inline_simple(text)
 
 
 def cmd_read(args):
@@ -318,10 +580,9 @@ def cmd_create_and_write(args):
 
     doc_id = create_response.data.document.document_id
 
-    # Step 2: Convert and write content
+    # Step 2: Convert and write content (reuse shared write logic)
     block_dicts = markdown_to_blocks(markdown)
     if not block_dicts:
-        # Document created but no content to write
         result = {
             "success": True,
             "document_id": doc_id,
@@ -333,63 +594,7 @@ def cmd_create_and_write(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    # Build Block objects
-    children = []
-    for bd in block_dicts:
-        block = Block()
-        block.block_type = bd["block_type"]
-
-        for field_name in ["text", "heading1", "heading2", "heading3", "heading4",
-                           "heading5", "heading6", "heading7", "heading8", "heading9",
-                           "bullet", "ordered", "code", "quote", "todo", "divider"]:
-            if field_name in bd:
-                setattr(block, field_name, _dict_to_text(bd[field_name], field_name))
-                break
-
-        children.append(block)
-
-    # Write in batches
-    BATCH_SIZE = 50
-    total_written = 0
-
-    for batch_start in range(0, len(children), BATCH_SIZE):
-        batch = children[batch_start:batch_start + BATCH_SIZE]
-
-        write_request = CreateDocumentBlockChildrenRequest.builder() \
-            .document_id(doc_id) \
-            .block_id(doc_id) \
-            .request_body(
-                CreateDocumentBlockChildrenRequestBody.builder()
-                .children(batch)
-                .index(-1)
-                .build()
-            ) \
-            .build()
-
-        write_response = client.docx.v1.document_block_children.create(write_request)
-
-        if not write_response.success():
-            print(json.dumps({
-                "success": False,
-                "error": f"Write failed: [{write_response.code}] {write_response.msg}",
-                "document_id": doc_id,
-                "blocks_written": total_written,
-                "url": f"https://feishu.cn/docx/{doc_id}",
-                "note": "Document was created but content write partially failed"
-            }, ensure_ascii=False))
-            return 1
-
-        total_written += len(batch)
-
-    result = {
-        "success": True,
-        "document_id": doc_id,
-        "title": args.title,
-        "blocks_written": total_written,
-        "url": f"https://feishu.cn/docx/{doc_id}"
-    }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    return _write_blocks_to_doc(client, doc_id, block_dicts)
 
 
 # ── Helper functions ──────────────────────────────────────────────────
@@ -756,6 +961,8 @@ def main():
     write_parser.add_argument("--doc", required=True, help="Document ID")
     write_parser.add_argument("--markdown", help="Markdown content string")
     write_parser.add_argument("--markdown-file", help="Path to Markdown file")
+    write_parser.add_argument("--mode", choices=["append", "overwrite"], default="append",
+                              help="Write mode: append (default) or overwrite (clear first)")
 
     # read
     read_parser = subparsers.add_parser("read", help="Read document content")

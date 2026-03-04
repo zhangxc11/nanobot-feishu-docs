@@ -73,4 +73,26 @@
 
 ---
 
+## Phase 3: 覆盖写入 + 表格支持
+
+### 2026-03-04 Session 1: 修复 write 覆盖 + 表格渲染
+
+#### 问题背景
+- 飞书 session `feishu.ST.1772584826` 中，AI 尝试 `--mode overwrite` 参数但不存在，每次失败后 fallback 到追加，导致文档内容重复 3 遍
+- Markdown 表格语法被当作普通文本段落写入，飞书文档中无法渲染为表格
+
+#### 任务拆解
+- [x] 更新需求文档 (REQUIREMENTS.md) — 新增 Phase 3 需求
+- [ ] `feishu_doc.py` write 命令增加 `--mode` 参数（overwrite/append）
+- [ ] 实现 overwrite 逻辑：先获取文档子 block 列表，再批量删除，最后写入新内容
+- [ ] `md_to_blocks.py` 增加 Markdown 表格解析
+- [ ] `feishu_doc.py` 增加 table block 创建支持（两步：创建空表格 → 填充单元格）
+- [ ] 编写表格相关单元测试
+- [ ] 端到端测试：overwrite 模式 + 表格渲染
+- [ ] 更新 SKILL.md 文档
+- [ ] 更新 ARCHITECTURE.md
+- [ ] Git 提交
+
+---
+
 *开始日期: 2026-02-28*

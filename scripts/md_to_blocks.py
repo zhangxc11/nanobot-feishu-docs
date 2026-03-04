@@ -47,6 +47,7 @@ BLOCK_TYPE_CODE = 14
 BLOCK_TYPE_QUOTE = 15
 BLOCK_TYPE_TODO = 17
 BLOCK_TYPE_DIVIDER = 22
+BLOCK_TYPE_TABLE = 31
 
 
 # ── Inline style parsing ─────────────────────────────────────────────
@@ -286,6 +287,90 @@ def _make_todo_block(text: str, done: bool = False) -> Dict[str, Any]:
     return block
 
 
+# ── Table parsing helpers ─────────────────────────────────────────────
+
+def _is_table_row(line: str) -> bool:
+    """Check if a line looks like a Markdown table row: | ... | ... |"""
+    stripped = line.strip()
+    return stripped.startswith('|') and stripped.endswith('|') and stripped.count('|') >= 2
+
+
+def _is_separator_row(line: str) -> bool:
+    """Check if a line is a Markdown table separator: |---|---|"""
+    stripped = line.strip()
+    if not stripped.startswith('|') or not stripped.endswith('|'):
+        return False
+    # Remove leading/trailing pipes, split by |
+    cells = stripped[1:-1].split('|')
+    for cell in cells:
+        cell = cell.strip()
+        # Separator cells: ---, :---, ---:, :---:
+        if not re.match(r'^:?-{1,}:?$', cell):
+            return False
+    return True
+
+
+def _is_table_start(lines: List[str], i: int) -> bool:
+    """Check if position i starts a Markdown table (header + separator + at least 1 data row)."""
+    if i + 1 >= len(lines):
+        return False
+    line = lines[i]
+    next_line = lines[i + 1]
+    return _is_table_row(line) and _is_separator_row(next_line)
+
+
+def _parse_table_row_cells(line: str) -> List[str]:
+    """Parse a table row line into cell content strings."""
+    stripped = line.strip()
+    # Remove leading/trailing pipes
+    if stripped.startswith('|'):
+        stripped = stripped[1:]
+    if stripped.endswith('|'):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split('|')]
+
+
+def _parse_table(lines: List[str], i: int) -> tuple:
+    """Parse a Markdown table starting at line i.
+
+    Returns:
+        (table_block_dict, next_line_index)
+    """
+    rows = []
+
+    # Parse header row
+    header_cells = _parse_table_row_cells(lines[i])
+    rows.append(header_cells)
+    col_count = len(header_cells)
+    i += 1
+
+    # Skip separator row
+    if i < len(lines) and _is_separator_row(lines[i]):
+        i += 1
+
+    # Parse data rows
+    while i < len(lines) and _is_table_row(lines[i]) and not _is_separator_row(lines[i]):
+        cells = _parse_table_row_cells(lines[i])
+        # Pad or trim to match column count
+        while len(cells) < col_count:
+            cells.append("")
+        cells = cells[:col_count]
+        rows.append(cells)
+        i += 1
+
+    # Build table block dict
+    table_block: Dict[str, Any] = {
+        "block_type": BLOCK_TYPE_TABLE,
+        "table": {
+            "rows": rows,
+            "column_size": col_count,
+            "header_row": True,
+        }
+    }
+
+    return table_block, i
+
+
 # ── Code language mapping ─────────────────────────────────────────────
 
 # Feishu code block language enum values
@@ -362,6 +447,13 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
         if re.match(r'^(\s*[-*_]\s*){3,}$', line):
             blocks.append(_make_divider_block())
             i += 1
+            continue
+
+        # ── Table: | col1 | col2 | ──
+        if _is_table_start(lines, i):
+            table_block, i = _parse_table(lines, i)
+            if table_block:
+                blocks.append(table_block)
             continue
 
         # ── Code block: ``` ──
