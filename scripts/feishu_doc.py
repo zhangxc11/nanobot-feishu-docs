@@ -536,7 +536,68 @@ def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -
         print(f"Warning: {len(failed_cells)} cells failed to write: {', '.join(failed_cells)}",
               file=sys.stderr)
 
+    # Step 4: Set column widths if available
+    column_widths = table_data.get("column_widths", [])
+    if column_widths and table_resp_block:
+        table_block_id = table_resp_block.block_id
+        _set_table_column_widths(doc_id, table_block_id, column_widths, token)
+
     return True
+
+
+def _set_table_column_widths(doc_id: str, table_block_id: str,
+                              column_widths: list, token: str) -> None:
+    """Set column widths for a table block via PATCH API.
+
+    Feishu's update_table_property API updates one column at a time:
+    - column_index: which column to update (0-based)
+    - column_width: width in px
+
+    Args:
+        doc_id: Document ID
+        table_block_id: Table block ID
+        column_widths: List of column widths (integers)
+        token: Tenant access token
+    """
+    url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{table_block_id}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    for col_idx, width in enumerate(column_widths):
+        body = {
+            "update_table_property": {
+                "column_width": width,
+                "column_index": col_idx,
+            }
+        }
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = http_requests.patch(url, headers=headers, json=body)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("code") == 0:
+                        break
+                    elif data.get("code") == 99991400:
+                        # Rate limited
+                        time.sleep(0.5 * (2 ** attempt))
+                    else:
+                        print(f"Warning: Failed to set column {col_idx} width: "
+                              f"[{data.get('code')}] {data.get('msg')}", file=sys.stderr)
+                        break
+                elif resp.status_code == 429:
+                    time.sleep(0.5 * (2 ** attempt))
+                else:
+                    print(f"Warning: HTTP {resp.status_code} setting column {col_idx} width",
+                          file=sys.stderr)
+                    break
+            except Exception as e:
+                print(f"Warning: Exception setting column {col_idx} width: {e}",
+                      file=sys.stderr)
+                break
 
 
 def _parse_inline_simple_import(text: str):

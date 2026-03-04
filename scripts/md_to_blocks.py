@@ -330,6 +330,81 @@ def _parse_table_row_cells(line: str) -> List[str]:
     return [cell.strip() for cell in stripped.split('|')]
 
 
+def _estimate_display_width(text: str) -> int:
+    """Estimate the display width of text content.
+
+    CJK characters count as 2 units, ASCII characters count as 1.
+    Inline markdown markers (**, *, ~~, `) are stripped before counting.
+    """
+    # Strip inline markdown markers for width estimation
+    stripped = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    stripped = re.sub(r'\*(.+?)\*', r'\1', stripped)
+    stripped = re.sub(r'~~(.+?)~~', r'\1', stripped)
+    stripped = re.sub(r'`([^`]+)`', r'\1', stripped)
+    stripped = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', stripped)
+
+    width = 0
+    for ch in stripped:
+        if '\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f' or \
+           '\uff00' <= ch <= '\uffef' or '\u3400' <= ch <= '\u4dbf':
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _calculate_column_widths(rows: List[List[str]], col_count: int,
+                             total_width: int = 600,
+                             min_col_width: int = 80,
+                             max_col_width: int = 400) -> List[int]:
+    """Calculate appropriate column widths based on cell content.
+
+    Strategy:
+    1. For each column, find the maximum display width across all rows
+    2. Use square root of content width for proportional allocation
+       (compresses the ratio between long and short columns for better visual balance)
+    3. Distribute total_width proportionally
+    4. Clamp each column to [min_col_width, max_col_width]
+
+    Args:
+        rows: List of rows, each row is a list of cell content strings
+        col_count: Number of columns
+        total_width: Target total table width in px (default 600)
+        min_col_width: Minimum column width in px
+        max_col_width: Maximum column width in px
+
+    Returns:
+        List of column widths (integers)
+    """
+    if col_count == 0:
+        return []
+
+    import math
+
+    # Calculate max content width for each column
+    col_max_widths = [0] * col_count
+    for row in rows:
+        for col_idx in range(min(len(row), col_count)):
+            w = _estimate_display_width(row[col_idx])
+            if w > col_max_widths[col_idx]:
+                col_max_widths[col_idx] = w
+
+    # Ensure minimum content width of 1 to avoid division by zero
+    col_max_widths = [max(w, 1) for w in col_max_widths]
+
+    # Use square root for more balanced proportional allocation
+    sqrt_widths = [math.sqrt(w) for w in col_max_widths]
+    total_sqrt = sum(sqrt_widths)
+
+    # Proportional allocation based on sqrt
+    raw_widths = [(sw / total_sqrt) * total_width for sw in sqrt_widths]
+
+    # Clamp to [min_col_width, max_col_width]
+    widths = [max(min_col_width, min(max_col_width, int(round(w)))) for w in raw_widths]
+
+    return widths
+
+
 def _parse_table(lines: List[str], i: int) -> tuple:
     """Parse a Markdown table starting at line i.
 
@@ -358,6 +433,9 @@ def _parse_table(lines: List[str], i: int) -> tuple:
         rows.append(cells)
         i += 1
 
+    # Calculate appropriate column widths based on content
+    column_widths = _calculate_column_widths(rows, col_count)
+
     # Build table block dict
     table_block: Dict[str, Any] = {
         "block_type": BLOCK_TYPE_TABLE,
@@ -365,6 +443,7 @@ def _parse_table(lines: List[str], i: int) -> tuple:
             "rows": rows,
             "column_size": col_count,
             "header_row": True,
+            "column_widths": column_widths,
         }
     }
 
