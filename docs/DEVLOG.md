@@ -83,15 +83,30 @@
 
 #### 任务拆解
 - [x] 更新需求文档 (REQUIREMENTS.md) — 新增 Phase 3 需求
-- [ ] `feishu_doc.py` write 命令增加 `--mode` 参数（overwrite/append）
-- [ ] 实现 overwrite 逻辑：先获取文档子 block 列表，再批量删除，最后写入新内容
-- [ ] `md_to_blocks.py` 增加 Markdown 表格解析
-- [ ] `feishu_doc.py` 增加 table block 创建支持（两步：创建空表格 → 填充单元格）
-- [ ] 编写表格相关单元测试
-- [ ] 端到端测试：overwrite 模式 + 表格渲染
-- [ ] 更新 SKILL.md 文档
+- [x] `feishu_doc.py` write 命令增加 `--mode` 参数（overwrite/append）
+- [x] 实现 overwrite 逻辑：先获取文档子 block 列表，再批量删除，最后写入新内容
+- [x] `md_to_blocks.py` 增加 Markdown 表格解析
+- [x] `feishu_doc.py` 增加 table block 创建支持（两步：SDK创建空表格 → HTTP API填充cell）
+- [x] 编写表格相关单元测试 — 9 项全部通过
+- [x] 端到端测试：overwrite 模式 + 表格渲染
+- [x] 更新 SKILL.md 文档
 - [ ] 更新 ARCHITECTURE.md
-- [ ] Git 提交
+- [x] Git 提交 (6e425f8)
+
+#### 端到端测试结果
+
+| 命令 | 结果 | 详情 |
+|---|---|---|
+| `create-and-write` (含表格) | ✅ | 创建文档 `T4wrdlMsGo45y0x8FIscUAXGnyc`，5行3列表格正确渲染 |
+| `write --mode overwrite` | ✅ | 清空原内容 + 写入新表格，内容完全替换 |
+| `write --mode append` (默认) | ✅ | 向已有文档追加内容，不影响原内容 |
+
+#### 技术细节
+- 飞书表格 block_type=31，table_cell block_type=32
+- 创建表格后 API 返回 `response.data.children[0].table.cells` 包含所有 cell block ID（flat 数组，行优先）
+- SDK 的 `document_block_children.create` 写入 cell 时有 JSON 解析 bug（空响应），改用 HTTP API
+- `_clear_document()` 使用 `BatchDeleteDocumentBlockChildren` API，start_index=0, end_index=N
+- 代码重构：`_write_blocks_to_doc()` 统一处理 regular blocks 和 table blocks
 
 ---
 
