@@ -506,7 +506,30 @@ def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -
                           file=sys.stderr)
                     break
 
-            if not success:
+            if success:
+                # Delete the default empty text block that Feishu auto-creates in each cell.
+                # We inserted our content at index 0, so the empty block is now at index 1.
+                del_url = (f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}"
+                           f"/blocks/{cell_block_id}/children/batch_delete")
+                del_body = {"start_index": 1, "end_index": 2}
+                for attempt in range(max_retries):
+                    try:
+                        del_resp = http_requests.delete(del_url, headers=headers, json=del_body)
+                        if del_resp.status_code == 200:
+                            del_data = del_resp.json()
+                            if del_data.get("code") == 0:
+                                break
+                            elif del_data.get("code") == 99991400:
+                                time.sleep(0.5 * (2 ** attempt))
+                            else:
+                                break  # Non-retryable
+                        elif del_resp.status_code == 429:
+                            time.sleep(0.5 * (2 ** attempt))
+                        else:
+                            break
+                    except Exception:
+                        break
+            else:
                 failed_cells.append(f"[{row_idx},{col_idx}]")
 
     if failed_cells:
