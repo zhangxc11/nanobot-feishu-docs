@@ -274,7 +274,7 @@ python3 skills/feishu-docs/scripts/feishu_doc.py add-member --doc DOC_ID --open-
 | `> quote` | 引用 |
 | `- [ ] todo` / `- [x] done` | 待办事项 |
 | `---` | 分割线 |
-| `\| A \| B \|` + `\|---\|---\|` | **表格**（含表头，支持单元格内联样式） |
+| `\| A \| B \|` + `\|---\|---\|` | **表格**（含表头，支持单元格内联样式，**列宽自动计算**） |
 | `**bold**` | 加粗 |
 | `*italic*` | 斜体 |
 | `` `code` `` | 行内代码 |

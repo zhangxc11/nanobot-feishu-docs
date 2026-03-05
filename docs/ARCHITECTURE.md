@@ -210,6 +210,39 @@ Body: { "children": [Block, ...], "index": 1 }
 - 追加时 `index=-1`（末尾），局部插入时 `index` 为 0-based 位置
 - 表格插入暂不支持指定 index（受限于两步创建流程），会追加到文档末尾
 
+#### 更新表格列宽
+```
+PATCH /open-apis/docx/v1/documents/{document_id}/blocks/{table_block_id}
+Body: {
+  "update_table_property": {
+    "column_width": 280,
+    "column_index": 1
+  }
+}
+Response: { "code": 0, "data": { "block": {...}, "document_revision_id": N } }
+```
+- 每次只能更新一列的宽度，需逐列调用
+- `column_index` 为 0-based 列号
+- `column_width` 为像素值（整数）
+- 创建表格后自动调用，列宽由 `md_to_blocks._calculate_column_widths()` 计算
+
+### 列宽计算算法
+
+```
+输入: 表格所有行的单元格内容
+输出: 每列的像素宽度列表
+
+1. 计算每列最大显示宽度（CJK字符=2, ASCII=1, 去除Markdown标记）
+2. 对每列宽度取平方根（压缩长短列差异）
+3. 按平方根比例分配总宽度（默认600px）
+4. Clamp到 [80, 400] px 范围
+```
+
+**为什么用平方根比例？**
+- 线性比例会导致短内容列过窄、长内容列过宽
+- 平方根压缩了比例差异，更接近人类手动调整的视觉效果
+- 参考手动调整的表格：分类列(5字符)→207px vs 含义列(35字符)→192px，比值远小于内容比
+
 ## 设计决策
 
 ### 为什么用 Python 脚本而不是 Shell 脚本？

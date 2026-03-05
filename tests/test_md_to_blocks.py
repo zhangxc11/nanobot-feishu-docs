@@ -15,6 +15,8 @@ from md_to_blocks import (
     _make_text_block,
     _make_divider_block,
     _make_todo_block,
+    _estimate_display_width,
+    _calculate_column_widths,
     BLOCK_TYPE_TEXT, BLOCK_TYPE_HEADING1, BLOCK_TYPE_HEADING2, BLOCK_TYPE_HEADING3,
     BLOCK_TYPE_BULLET, BLOCK_TYPE_ORDERED, BLOCK_TYPE_CODE, BLOCK_TYPE_QUOTE,
     BLOCK_TYPE_TODO, BLOCK_TYPE_DIVIDER, BLOCK_TYPE_TABLE,
@@ -354,6 +356,118 @@ class TestTableParsing(unittest.TestCase):
         self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_TABLE)
         table = blocks[0]["table"]
         self.assertEqual(table["column_size"], 3)
+
+    def test_table_has_column_widths(self):
+        """Tables should include auto-calculated column_widths."""
+        md = "| Name | Age |\n|---|---|\n| Alice | 30 |\n| Bob | 25 |"
+        blocks = markdown_to_blocks(md)
+        table = blocks[0]["table"]
+        self.assertIn("column_widths", table)
+        widths = table["column_widths"]
+        self.assertEqual(len(widths), 2)
+        # Each width should be a positive integer
+        for w in widths:
+            self.assertIsInstance(w, int)
+            self.assertGreaterEqual(w, 80)  # min_col_width
+            self.assertLessEqual(w, 400)    # max_col_width
+
+    def test_table_column_widths_proportional(self):
+        """Longer content columns should get wider widths."""
+        md = "| ID | Description |\n|---|---|\n| 1 | This is a very long description text |"
+        blocks = markdown_to_blocks(md)
+        widths = blocks[0]["table"]["column_widths"]
+        # Description column should be wider than ID column
+        self.assertGreater(widths[1], widths[0])
+
+    def test_table_column_widths_cjk(self):
+        """CJK characters should count as 2 display width units."""
+        md = "| 名称 | Name |\n|---|---|\n| 测试 | Test |"
+        blocks = markdown_to_blocks(md)
+        widths = blocks[0]["table"]["column_widths"]
+        # CJK column "名称"/"测试" (4 display units) vs "Name"/"Test" (4 display units)
+        # Should be roughly equal
+        self.assertEqual(len(widths), 2)
+        # Both should be reasonable widths
+        for w in widths:
+            self.assertGreaterEqual(w, 80)
+
+
+class TestDisplayWidthEstimation(unittest.TestCase):
+    """Test _estimate_display_width for CJK-aware width calculation."""
+
+    def test_ascii_only(self):
+        self.assertEqual(_estimate_display_width("hello"), 5)
+
+    def test_cjk_only(self):
+        self.assertEqual(_estimate_display_width("你好"), 4)
+
+    def test_mixed(self):
+        self.assertEqual(_estimate_display_width("hello你好"), 9)  # 5 + 4
+
+    def test_empty(self):
+        self.assertEqual(_estimate_display_width(""), 0)
+
+    def test_strips_bold_markers(self):
+        # **bold** should count as 4, not 8
+        self.assertEqual(_estimate_display_width("**bold**"), 4)
+
+    def test_strips_italic_markers(self):
+        self.assertEqual(_estimate_display_width("*italic*"), 6)
+
+    def test_strips_code_markers(self):
+        self.assertEqual(_estimate_display_width("`code`"), 4)
+
+    def test_strips_link_markers(self):
+        # [text](url) should count as len("text") = 4
+        self.assertEqual(_estimate_display_width("[text](https://example.com)"), 4)
+
+    def test_strips_strikethrough(self):
+        self.assertEqual(_estimate_display_width("~~deleted~~"), 7)
+
+
+class TestColumnWidthCalculation(unittest.TestCase):
+    """Test _calculate_column_widths logic."""
+
+    def test_equal_content(self):
+        rows = [["AA", "BB"], ["CC", "DD"]]
+        widths = _calculate_column_widths(rows, 2)
+        self.assertEqual(len(widths), 2)
+        # Equal content → equal widths
+        self.assertEqual(widths[0], widths[1])
+
+    def test_unequal_content(self):
+        rows = [["A", "BBBBBBBBBBBBBBBBBBBB"]]
+        widths = _calculate_column_widths(rows, 2)
+        # Longer content column should be wider
+        self.assertGreater(widths[1], widths[0])
+
+    def test_min_width_enforced(self):
+        rows = [["A", "B"]]
+        widths = _calculate_column_widths(rows, 2, total_width=600, min_col_width=80)
+        for w in widths:
+            self.assertGreaterEqual(w, 80)
+
+    def test_max_width_enforced(self):
+        rows = [["A" * 200, "B"]]
+        widths = _calculate_column_widths(rows, 2, total_width=600, max_col_width=400)
+        for w in widths:
+            self.assertLessEqual(w, 400)
+
+    def test_empty_columns(self):
+        widths = _calculate_column_widths([], 0)
+        self.assertEqual(widths, [])
+
+    def test_three_columns(self):
+        rows = [
+            ["分类", "含义", "行动"],
+            ["🟢 A类", "自包含、可复现、验证明确", "优先构造"],
+        ]
+        widths = _calculate_column_widths(rows, 3)
+        self.assertEqual(len(widths), 3)
+        total = sum(widths)
+        # Total should be close to 600 (default)
+        self.assertGreaterEqual(total, 240)  # 3 * min_col_width
+        self.assertLessEqual(total, 1200)    # 3 * max_col_width
 
 
 if __name__ == "__main__":

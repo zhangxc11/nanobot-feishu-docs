@@ -167,4 +167,68 @@
 
 ---
 
+## Phase 4.5: 表格健壮性修复
+
+### 2026-03-04 Session 3: 表格 Cell 写入修复 ✅
+
+#### 问题背景
+- 飞书 API 对表格 cell 写入有速率限制，快速连续写入会返回 HTTP 429
+- 飞书创建表格时每个 cell 自动生成一个空 text block，写入内容后该空 block 残留导致多余空行
+- insert-blocks 命令创建表格时 index 参数未传递，表格始终追加到文档末尾
+
+#### 任务拆解
+- [x] 表格 cell 写入增加 HTTP 429 指数退避重试（最多 5 次）(6aceb3c)
+- [x] insert-blocks 传递正确的 index 参数到 `_write_table_block` (6aceb3c)
+- [x] 写入 cell 内容后删除飞书自动生成的默认空 text block (78182e2)
+
+#### 技术细节
+- 重试策略：HTTP 429 或 API code 99991400 时，sleep `0.5 * 2^attempt` 秒后重试
+- 空 block 清理：成功写入 cell 内容后，通过 `BatchDeleteDocumentBlockChildren(start_index=1, end_index=2)` 删除 index 1 的默认空 block
+- `_write_table_block` 新增 `index` 参数，默认 -1（追加），支持指定位置插入
+
+---
+
+## Phase 5: 表格列宽自动计算
+
+### 2026-03-05 Session 1: 列宽自动设置 ✅
+
+#### 问题背景
+- 飞书创建表格时所有列默认宽度 100px，导致表格过窄，内容换行严重
+- 用户需要手动在飞书中逐列拖拽调整宽度，体验差
+- 飞书 API 支持通过 `update_table_property` PATCH 接口设置列宽
+
+#### 任务拆解
+- [x] 调研飞书 API 表格列宽设置能力 — `update_table_property` 逐列更新
+- [x] 修复文档 `VYRSdlzlTooO4txEtpGcGNZmnOb` 中 2 个窄表格的列宽
+- [x] `md_to_blocks.py` 新增 `_estimate_display_width()` — CJK 感知字符宽度估算
+- [x] `md_to_blocks.py` 新增 `_calculate_column_widths()` — 平方根比例列宽计算
+- [x] `_parse_table()` 自动计算并存储 `column_widths` 到 table block dict
+- [x] `feishu_doc.py` 新增 `_set_table_column_widths()` — PATCH API 逐列设置
+- [x] `_write_table_block()` 新增 Step 4：创建表格后自动设置列宽
+- [x] 端到端测试：创建测试文档验证列宽自动设置 ✅
+- [x] 补充单元测试：18 项新增测试全部通过（56/56 总计）
+- [x] 补齐 dev-workflow 文档（REQUIREMENTS / ARCHITECTURE / DEVLOG）
+- [x] Git 提交 (5100586 代码, 文档补齐另行提交)
+
+#### 端到端测试结果
+
+| 操作 | 结果 | 详情 |
+|---|---|---|
+| 修复窄表格（分类表 5x3） | ✅ | [100,100,100] → [100,280,150] |
+| 修复窄表格（语法表 4x2） | ✅ | [100,100] → [200,380] |
+| 创建新文档含表格 | ✅ | 文档 `FtFWdQlRDoftLkxzGQacq78knjh`，列宽 [115,306,179] 和 [278,322] 自动设置 |
+| 单元测试 | ✅ | 56/56 全部通过 |
+
+#### 列宽计算算法
+- 估算每列最大显示宽度（CJK=2, ASCII=1, 去除 Markdown 标记）
+- 对宽度取平方根后按比例分配总宽度（默认 600px）
+- Clamp 到 [80, 400] px 范围
+- 平方根比例压缩长短列差异，接近人类手动调整的视觉效果
+
+#### ⚠️ 流程合规性
+- 代码实现先于文档（5100586），文档在后续 session 补齐
+- 后续应严格遵循先文档后编码的流程
+
+---
+
 *开始日期: 2026-02-28*
