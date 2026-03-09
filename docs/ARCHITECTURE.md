@@ -271,6 +271,30 @@ Response: { "code": 0, "data": { "block": {...}, "document_revision_id": N } }
 - 局部编辑更安全：误操作只影响目标 block，不会丢失整个文档内容
 - overwrite 仅作为极端场景的后备方案保留
 
+### 表格行数自动拆分
+
+飞书 API 创建表格时单次最多 9 行（含 header），`md_to_blocks.py` 的 `_parse_table()` 在解析完表格后检测行数：
+- 行数 ≤ 9：返回单个 table block（原有逻辑不变）
+- 行数 > 9：调用 `_split_table()` 拆分为多个子表格
+  - header 行复制到每个子表格
+  - 数据行按 8 行一组（MAX_TABLE_ROWS - 1）
+  - 续表间插入 `（续表）` 提示文本 block
+  - 返回 block 列表（table + text + table + ...）
+
+### 表格创建 retry + 空响应处理
+
+`_write_table_block()` Step 1（SDK 创建空表格）增加 retry：
+- 最多 3 次重试，指数退避（`2 * 2^attempt` 秒）
+- 识别 rate limit：API code 99991400 或 HTTP 429
+- 空响应处理：`response.raw` 或 `response.data` 为空时不 crash，返回 False
+
+### 表格间自动延迟
+
+`_write_blocks_to_doc()` 写入 table segment 前检查是否已有表格写入：
+- 第一个表格不延迟
+- 后续表格写入前 sleep 3 秒
+- 普通文本 block 不触发延迟
+
 ---
 
 *创建日期: 2026-02-28*

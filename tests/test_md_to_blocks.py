@@ -17,6 +17,8 @@ from md_to_blocks import (
     _make_todo_block,
     _estimate_display_width,
     _calculate_column_widths,
+    _split_table,
+    MAX_TABLE_ROWS,
     BLOCK_TYPE_TEXT, BLOCK_TYPE_HEADING1, BLOCK_TYPE_HEADING2, BLOCK_TYPE_HEADING3,
     BLOCK_TYPE_BULLET, BLOCK_TYPE_ORDERED, BLOCK_TYPE_CODE, BLOCK_TYPE_QUOTE,
     BLOCK_TYPE_TODO, BLOCK_TYPE_DIVIDER, BLOCK_TYPE_TABLE,
@@ -468,6 +470,124 @@ class TestColumnWidthCalculation(unittest.TestCase):
         # Total should be close to 600 (default)
         self.assertGreaterEqual(total, 240)  # 3 * min_col_width
         self.assertLessEqual(total, 1200)    # 3 * max_col_width
+
+
+class TestTableSplitting(unittest.TestCase):
+    """Test automatic table splitting for tables exceeding MAX_TABLE_ROWS (9)."""
+
+    def _make_table_md(self, data_row_count: int, col_count: int = 2) -> str:
+        """Helper: generate a Markdown table with given number of data rows."""
+        headers = [f"Col{j+1}" for j in range(col_count)]
+        header_line = "| " + " | ".join(headers) + " |"
+        sep_line = "| " + " | ".join(["---"] * col_count) + " |"
+        data_lines = []
+        for r in range(data_row_count):
+            cells = [f"R{r+1}C{j+1}" for j in range(col_count)]
+            data_lines.append("| " + " | ".join(cells) + " |")
+        return "\n".join([header_line, sep_line] + data_lines)
+
+    def test_8_data_rows_no_split(self):
+        """8 data rows + 1 header = 9 rows total → no split needed."""
+        md = self._make_table_md(8)
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_TABLE)
+        self.assertEqual(len(blocks[0]["table"]["rows"]), 9)
+
+    def test_9_data_rows_splits_into_2(self):
+        """9 data rows + 1 header = 10 rows → split into 2 tables."""
+        md = self._make_table_md(9)
+        blocks = markdown_to_blocks(md)
+        # Expect: table(9 rows) + text("（续表）") + table(2 rows: header + 1 data)
+        table_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TABLE]
+        text_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TEXT]
+        self.assertEqual(len(table_blocks), 2)
+        self.assertEqual(len(text_blocks), 1)
+
+        # First table: header + 8 data rows = 9 rows
+        self.assertEqual(len(table_blocks[0]["table"]["rows"]), 9)
+        # Second table: header + 1 data row = 2 rows
+        self.assertEqual(len(table_blocks[1]["table"]["rows"]), 2)
+
+        # Verify header is copied
+        self.assertEqual(table_blocks[0]["table"]["rows"][0], table_blocks[1]["table"]["rows"][0])
+
+        # Verify "（续表）" text
+        hint = text_blocks[0]["text"]["elements"][0]["text_run"]["content"]
+        self.assertEqual(hint, "（续表）")
+
+    def test_16_data_rows_splits_into_2(self):
+        """16 data rows + 1 header = 17 rows → split into 2 tables (8+8)."""
+        md = self._make_table_md(16)
+        blocks = markdown_to_blocks(md)
+        table_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TABLE]
+        text_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TEXT]
+        self.assertEqual(len(table_blocks), 2)
+        self.assertEqual(len(text_blocks), 1)
+
+        # First: header + 8 data = 9
+        self.assertEqual(len(table_blocks[0]["table"]["rows"]), 9)
+        # Second: header + 8 data = 9
+        self.assertEqual(len(table_blocks[1]["table"]["rows"]), 9)
+
+    def test_17_data_rows_splits_into_3(self):
+        """17 data rows + 1 header = 18 rows → split into 3 tables (8+8+1)."""
+        md = self._make_table_md(17)
+        blocks = markdown_to_blocks(md)
+        table_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TABLE]
+        text_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TEXT]
+        self.assertEqual(len(table_blocks), 3)
+        self.assertEqual(len(text_blocks), 2)  # Two "（续表）" hints
+
+        # First: header + 8 data = 9
+        self.assertEqual(len(table_blocks[0]["table"]["rows"]), 9)
+        # Second: header + 8 data = 9
+        self.assertEqual(len(table_blocks[1]["table"]["rows"]), 9)
+        # Third: header + 1 data = 2
+        self.assertEqual(len(table_blocks[2]["table"]["rows"]), 2)
+
+        # All headers should be identical
+        header = table_blocks[0]["table"]["rows"][0]
+        for tb in table_blocks[1:]:
+            self.assertEqual(tb["table"]["rows"][0], header)
+
+    def test_split_preserves_data_order(self):
+        """Verify data rows are in correct order after splitting."""
+        md = self._make_table_md(10)
+        blocks = markdown_to_blocks(md)
+        table_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TABLE]
+
+        # Collect all data rows (skip header from each sub-table)
+        all_data = []
+        for tb in table_blocks:
+            all_data.extend(tb["table"]["rows"][1:])
+
+        # Should have all 10 data rows in order
+        self.assertEqual(len(all_data), 10)
+        for r in range(10):
+            self.assertEqual(all_data[r][0], f"R{r+1}C1")
+
+    def test_split_tables_have_column_widths(self):
+        """Each split sub-table should have column_widths."""
+        md = self._make_table_md(10, col_count=3)
+        blocks = markdown_to_blocks(md)
+        table_blocks = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TABLE]
+        for tb in table_blocks:
+            self.assertIn("column_widths", tb["table"])
+            self.assertEqual(len(tb["table"]["column_widths"]), 3)
+
+    def test_split_with_surrounding_content(self):
+        """Table splitting works correctly with surrounding content."""
+        md = "# Title\n\n" + self._make_table_md(10) + "\n\nSome text after."
+        blocks = markdown_to_blocks(md)
+        types = [b["block_type"] for b in blocks]
+        self.assertIn(BLOCK_TYPE_HEADING1, types)
+        self.assertIn(BLOCK_TYPE_TABLE, types)
+        # The last block should be text
+        text_blocks_after = [b for b in blocks if b["block_type"] == BLOCK_TYPE_TEXT
+                             and b.get("text", {}).get("elements", [{}])[0]
+                             .get("text_run", {}).get("content", "") == "Some text after."]
+        self.assertEqual(len(text_blocks_after), 1)
 
 
 if __name__ == "__main__":

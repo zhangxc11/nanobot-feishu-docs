@@ -231,4 +231,24 @@
 
 ---
 
+## Phase 6: P0 健壮性修复
+
+### 2026-03-09 Session: P0 改进
+
+#### 问题背景
+- 飞书 API 创建表格限制 9 行（含 header），超过返回 invalid param
+- `_write_table_block()` Step 1 无 retry，API 返回空响应时 JSON 解析 crash
+- 连续写入多个表格触发 rate limit，无自动延迟
+
+#### 任务拆解
+- [ ] P0-1: `md_to_blocks.py` — 表格行数自动拆分（>9 行拆分为多个子表格）
+- [ ] P0-1: 编写单元测试（9行不拆分、10行拆2个、17行拆3个）
+- [ ] P0-2: `feishu_doc.py` — `_write_table_block()` Step 1 增加 retry + 空响应处理
+- [ ] P0-3: `feishu_doc.py` — `_write_blocks_to_doc()` 表格间自动 3 秒延迟
+- [ ] P0-2/P0-3: 编写 mock 测试或语法检查
+- [ ] 更新文档（REQUIREMENTS / ARCHITECTURE / DEVLOG）
+- [ ] Git 提交
+
+---
+
 *开始日期: 2026-02-28*

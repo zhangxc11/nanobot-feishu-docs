@@ -49,6 +49,10 @@ BLOCK_TYPE_TODO = 17
 BLOCK_TYPE_DIVIDER = 22
 BLOCK_TYPE_TABLE = 31
 
+# ── Table splitting constants ─────────────────────────────────────────
+
+MAX_TABLE_ROWS = 9  # 飞书 API 限制：单次创建表格最多 9 行（含 header）
+
 
 # ── Inline style parsing ─────────────────────────────────────────────
 
@@ -409,7 +413,8 @@ def _parse_table(lines: List[str], i: int) -> tuple:
     """Parse a Markdown table starting at line i.
 
     Returns:
-        (table_block_dict, next_line_index)
+        (blocks, next_line_index) where blocks is either a single table_block_dict
+        or a list of blocks (when table exceeds MAX_TABLE_ROWS and needs splitting).
     """
     rows = []
 
@@ -433,6 +438,10 @@ def _parse_table(lines: List[str], i: int) -> tuple:
         rows.append(cells)
         i += 1
 
+    # Check if table needs splitting (exceeds MAX_TABLE_ROWS)
+    if len(rows) > MAX_TABLE_ROWS:
+        return _split_table(rows, col_count), i
+
     # Calculate appropriate column widths based on content
     column_widths = _calculate_column_widths(rows, col_count)
 
@@ -448,6 +457,49 @@ def _parse_table(lines: List[str], i: int) -> tuple:
     }
 
     return table_block, i
+
+
+def _split_table(rows: List[List[str]], col_count: int) -> List[Dict[str, Any]]:
+    """Split a table with more than MAX_TABLE_ROWS into multiple sub-tables.
+
+    Each sub-table includes the header row and up to (MAX_TABLE_ROWS - 1) data rows.
+    A "（续表）" text block is inserted between consecutive sub-tables.
+
+    Args:
+        rows: All rows including header (rows[0] is header)
+        col_count: Number of columns
+
+    Returns:
+        List of block dicts (table blocks interleaved with text blocks)
+    """
+    header = rows[0]
+    data_rows = rows[1:]
+    max_data_per_table = MAX_TABLE_ROWS - 1  # Reserve 1 row for header
+
+    blocks: List[Dict[str, Any]] = []
+
+    for chunk_start in range(0, len(data_rows), max_data_per_table):
+        chunk = data_rows[chunk_start:chunk_start + max_data_per_table]
+        sub_rows = [header] + chunk
+
+        # Insert "（续表）" hint before continuation tables
+        if chunk_start > 0:
+            blocks.append(_make_text_block(BLOCK_TYPE_TEXT, "（续表）"))
+
+        # Calculate column widths for this sub-table
+        column_widths = _calculate_column_widths(sub_rows, col_count)
+
+        blocks.append({
+            "block_type": BLOCK_TYPE_TABLE,
+            "table": {
+                "rows": sub_rows,
+                "column_size": col_count,
+                "header_row": True,
+                "column_widths": column_widths,
+            }
+        })
+
+    return blocks
 
 
 # ── Code language mapping ─────────────────────────────────────────────
@@ -530,9 +582,13 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
 
         # ── Table: | col1 | col2 | ──
         if _is_table_start(lines, i):
-            table_block, i = _parse_table(lines, i)
-            if table_block:
-                blocks.append(table_block)
+            result, i = _parse_table(lines, i)
+            if result:
+                if isinstance(result, list):
+                    # Table was split into multiple blocks
+                    blocks.extend(result)
+                else:
+                    blocks.append(result)
             continue
 
         # ── Code block: ``` ──

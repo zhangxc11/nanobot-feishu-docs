@@ -176,6 +176,24 @@
 - Python 3.11+
 - lark-oapi（已安装在 nanobot venv311 中）
 
+### Phase 6: P0 健壮性修复
+
+> 详细背景见 `docs/ISSUES_AND_IMPROVEMENTS.md`
+
+#### F6.1 表格行数自动拆分（P0-1）
+- 飞书 API 创建表格时单次最多 9 行（含 header），超过返回 `invalid param`
+- `md_to_blocks.py` 的 `_parse_table()` 自动检测行数，超过 9 行时拆分为多个子表格
+- 拆分策略：header 行复制到每个子表格，数据行按 8 行一组，续表间加"（续表）"提示文本
+
+#### F6.2 表格创建 retry + 空响应处理（P0-2）
+- `feishu_doc.py` 的 `_write_table_block()` Step 1（创建空表格）增加 retry 逻辑（最多 3 次，指数退避）
+- 处理 API 返回空响应的情况（当前 JSON 解析 crash）
+- 识别 rate limit 错误码（99991400 或 HTTP 429）
+
+#### F6.3 表格间自动延迟（P0-3）
+- `feishu_doc.py` 的 `_write_blocks_to_doc()` 连续写入多个表格时，表格之间自动加 3 秒延迟
+- 只有表格需要延迟，普通文本 block 不需要
+
 ## Issues
 
 （开发过程中发现的问题记录在此）
