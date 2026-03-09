@@ -330,6 +330,14 @@ Response: { "code": 0, "data": { "block": {...}, "document_revision_id": N } }
 - `cmd_create_and_write()` 在创建文档后、写入内容前调用 `_add_member()`
 - 通过 `--add-member` 和 `--member-perm` 参数传递
 
+### 表格创建错误信息增强（P2-B）
+
+`_write_table_block()` Step 1 失败时的错误信息改进：
+- 错误信息包含表格维度：`Table create failed (rows=11, cols=7): [code] msg`
+- 错误码 `1770001`（invalid param）且行数 > 9 时，追加提示：`NOTE: 飞书限制单次创建最多 9 行`
+- 错误码 `99991400`（rate limit）时，追加提示：`触发频率限制，将自动重试`
+- 作为防御性提示，即使 P0-1 已自动拆分，仍在错误信息中给出诊断线索
+
 ---
 
 *创建日期: 2026-02-28*

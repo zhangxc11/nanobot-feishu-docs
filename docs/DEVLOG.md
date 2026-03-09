@@ -348,4 +348,58 @@
 
 ---
 
+## Phase 8: P2 改进
+
+### 2026-03-09 Session: P2 改进
+
+#### 问题背景
+- SKILL.md 缺少命令速查表，Agent 需要通读全文才能找到参数名
+- P1 新增的 `--resume-from`、`--add-member`、`--member-perm` 参数未在 SKILL.md 中说明
+- 大文档写入的使用建议（timeout、subagent）未记录
+- 表格创建失败时错误信息不包含维度信息，难以诊断
+
+#### 任务拆解
+- [x] P2-A: SKILL.md 全面更新
+  - [x] 增加"命令速查"表格（12+ 个命令的完整参数签名）
+  - [x] 补充 write 命令的 `--resume-from` 参数说明
+  - [x] 补充 create-and-write 的 `--add-member`、`--member-perm`、`--resume-from` 参数说明
+  - [x] 新增"大文档写入建议"使用技巧
+  - [x] 逐个检查所有命令参数完整性
+- [x] P2-B: 错误信息增强
+  - [x] `_write_table_block()` 错误信息包含表格维度
+  - [x] 错误码 1770001 + 行数 > 9 时提示"行数超限"
+  - [x] 错误码 99991400 时提示"频率限制"
+  - [x] 编写 mock 测试验证错误信息格式
+- [x] 运行全部测试确保不回归
+- [x] Git 提交
+
+#### 实现细节
+
+##### P2-A: SKILL.md 全面更新
+- 在"脚本位置"后新增"命令速查"表格，包含全部 12 个命令的完整参数签名
+- write 命令新增 `--resume-from N` 参数说明
+- create-and-write 命令新增 `--add-member`、`--member-perm`、`--resume-from` 参数说明
+- 使用技巧新增"大文档写入建议"：自动分段、timeout=600、subagent、断点续传
+- 逐个检查所有命令参数完整性，确认无遗漏
+
+##### P2-B: 错误信息增强
+- `_write_table_block()` Step 1 失败时错误信息格式改为：`Table create failed (rows=N, cols=M): [code] msg`
+- 错误码 1770001 + rows > 9 时追加：`— NOTE: 飞书限制单次创建最多 9 行`
+- 错误码 99991400 时追加：`— NOTE: 触发频率限制，将自动重试`
+- rate limit 重试消息也包含维度和中文提示
+
+#### 测试结果
+- `tests/test_md_to_blocks.py`: 63/63 通过（无变更）
+- `tests/test_feishu_doc_p0.py`: 6/6 通过（回归检查）
+- `tests/test_feishu_doc_p1.py`: 26/26 通过（回归检查）
+- `tests/test_feishu_doc_p2.py`: 5/5 通过（新增）
+  - test_invalid_param_with_rows_over_9: 验证行数超限提示
+  - test_invalid_param_with_rows_under_9: 验证行数 ≤ 9 不提示
+  - test_rate_limit_retry_message_includes_dimensions: 验证重试消息含维度
+  - test_rate_limit_final_failure_message: 验证最终失败消息
+  - test_error_message_format_with_dimensions: 验证错误信息格式
+- 总计: 100/100 全部通过
+
+---
+
 *开始日期: 2026-02-28*
