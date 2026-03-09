@@ -847,7 +847,19 @@ def _read_blocks(client, doc_id: str) -> int:
         "block_count": len(blocks_data),
         "blocks": blocks_data
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    try:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except (TypeError, ValueError) as e:
+        print(f"ERROR: JSON serialization failed: {e}", file=sys.stderr)
+        # Fallback: try with _safe_serialize on the entire result
+        try:
+            print(json.dumps(_safe_serialize(result), ensure_ascii=False, indent=2))
+        except Exception as e2:
+            print(json.dumps({
+                "success": False,
+                "error": f"JSON serialization failed: {e2}"
+            }, ensure_ascii=False))
+            return 1
     return 0
 
 
@@ -1030,7 +1042,26 @@ def _block_to_dict(block) -> dict:
                 table_info["cells"] = list(cells)
             result["table"] = table_info
 
-    return result
+    return _safe_serialize(result)
+
+
+def _safe_serialize(obj):
+    """Convert lark-oapi objects to JSON-serializable types.
+
+    Ensures all values in the output are basic Python types
+    (str/int/float/bool/list/dict/None) that json.dumps can handle.
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, list):
+        return [_safe_serialize(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _safe_serialize(v) for k, v in obj.items()}
+    # lark-oapi object: try to extract __dict__
+    if hasattr(obj, '__dict__'):
+        return {k: _safe_serialize(v) for k, v in obj.__dict__.items()
+                if not k.startswith('_')}
+    return str(obj)
 
 
 # ── Comment operations ────────────────────────────────────────────────
