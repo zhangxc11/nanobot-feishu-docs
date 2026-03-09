@@ -163,6 +163,59 @@
 
 ---
 
+### 问题 10: 嵌套代码块解析混乱（Bug #4）✅ 已修复
+
+**现象**: 当 Markdown 中有嵌套代码块时（如用 ```````` 包裹 ```````），解析器无法正确匹配结束标记，导致后续内容全部被吞入代码块。
+
+**根因**: `md_to_blocks.py` 代码块结束标记使用 `startswith('```')` 匹配，无法区分 ```````` 和 ```````。所有以 3 个 backtick 开头的行都会被当作结束标记。
+
+**影响**: 嵌套代码块（如展示 Markdown 代码块语法的文档）解析完全错误，后续所有内容被吞入代码块。
+
+**修复方案**:
+- 记录开始 fence 的 backtick 数量（`fence_len`）
+- 结束标记：行 strip 后以 ≥ fence_len 个 backtick 开头，且之后无非空字符
+- 修改文件：`scripts/md_to_blocks.py`
+
+---
+
+### 问题 11: `read --format blocks` 无法读取表格 cell 文本（Bug #7）✅ 已修复
+
+**现象**: `read --format blocks` 返回的表格 block 中，cell 的文本内容为空。
+
+**根因**:
+- `_block_to_dict()` 只处理了 text/heading/code 等 block_type，没有处理 table（block_type=31）
+- `_read_blocks()` 只做了一层 list，没有按 parent-child 关系组织 table cell 内容
+- 飞书 API 返回的 block 列表已包含所有 block（含 table cell 和 cell 内的 text block），但脚本未利用这些数据
+
+**影响**: 使用 `read --format blocks` 获取的表格内容为空，无法用于后续编辑操作。
+
+**修复方案**:
+- `_block_to_dict()` 增加 table (block_type=31) 属性提取（row_size/column_size/header_row/cells）
+- `_read_blocks()` 构建 block_id → block_dict 查找表，对 table block 的 cells 递归查找子 block 文本
+- 输出新增 `table.cell_contents` 数组
+- 修改文件：`scripts/feishu_doc.py`
+
+---
+
+### 问题 12: `read --format blocks` JSON 输出不稳定（Bug #9）✅ 已修复
+
+**现象**: 某些情况下 blocks 输出无法被 JSON 解析，`json.dumps` 抛出 TypeError。
+
+**根因**:
+- `_block_to_dict()` 中某些属性是 lark-oapi 对象（如 TextElementStyle、Link 等）而非基础类型
+- `json.dumps` 无法序列化这些对象，导致整个输出失败
+- 没有 try-except 保护，错误直接 crash
+
+**影响**: Agent 无法解析 `read --format blocks` 的输出，后续操作中断。
+
+**修复方案**:
+- 新增 `_safe_serialize()` 辅助函数：递归转换所有值为 JSON 可序列化的基础类型
+- `_block_to_dict()` 返回值经过 `_safe_serialize` 处理
+- `_read_blocks()` 的 `json.dumps` 增加 try-except 保护，失败时 fallback 到 `_safe_serialize` 再试
+- 修改文件：`scripts/feishu_doc.py`
+
+---
+
 ## 二、改进方案优先级
 
 ### P0 — 必须修复（影响基本可用性）

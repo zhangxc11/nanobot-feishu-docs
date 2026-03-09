@@ -238,7 +238,18 @@
 
 ## Issues
 
-（开发过程中发现的问题记录在此）
+### Bug #4: 嵌套代码块解析混乱 ✅ (已修复)
+- `md_to_blocks.py` 代码块解析使用 `startswith('```')` 匹配结束标记，无法区分不同 backtick 数量的 fence
+- 修复：记录开始 fence 的 backtick 数量，结束标记必须匹配相同或更多数量
+
+### Bug #7: `read --format blocks` 无法读取表格 cell 文本 ✅ (已修复)
+- `_block_to_dict()` 未处理 table（block_type=31）的属性
+- `_read_blocks()` 未按 parent-child 关系组织表格 cell 内容
+- 修复：`_block_to_dict` 增加 table 属性提取；`_read_blocks` 构建 block 查找表并解析 cell 文本
+
+### Bug #9: `read --format blocks` JSON 输出不稳定 ✅ (已修复)
+- `_block_to_dict` 中某些属性可能是 lark-oapi 对象，`json.dumps` 无法序列化
+- 修复：新增 `_safe_serialize()` 函数确保所有值为基础类型；`_read_blocks` 的 `json.dumps` 增加 try-except 保护
 
 ---
 

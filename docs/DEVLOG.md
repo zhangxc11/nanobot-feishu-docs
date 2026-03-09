@@ -402,4 +402,64 @@
 
 ---
 
+## Phase 9: Bug 修复 (#4, #7, #9)
+
+### 2026-03-10 Session: 3 个遗留 Bug 修复 ✅
+
+#### 问题背景
+- Bug #4: `md_to_blocks.py` 嵌套代码块（如 ```````` 包裹 ```````）解析混乱，结束标记无法正确匹配
+- Bug #7: `read --format blocks` 返回的表格 block 中 cell 文本内容为空
+- Bug #9: `read --format blocks` 的 JSON 输出在某些情况下无法被 JSON 解析
+
+#### 任务拆解
+- [x] Bug #4: `md_to_blocks.py` — 嵌套代码块解析，支持 N backtick fence 匹配
+  - [x] 记录开始 fence 的 backtick 数量
+  - [x] 结束标记必须匹配相同或更多数量的 backtick
+  - [x] 编写 7 个单元测试（3/4/5 backtick 嵌套、EOF、语言标记等）
+  - [x] Git commit: `fix: #4 嵌套代码块解析 — 支持 N backtick fence 匹配`
+- [x] Bug #7: `feishu_doc.py` — read blocks 表格内容读取
+  - [x] `_block_to_dict()` 增加 table (block_type=31) 属性提取
+  - [x] `_read_blocks()` 构建 block 查找表，按 parent-child 关系解析 cell 文本
+  - [x] 编写 5 个 mock 测试（table 属性、cell 内容解析、边界情况）
+  - [x] Git commit: `fix: #7 read blocks 表格内容读取`
+- [x] Bug #9: `feishu_doc.py` — read blocks JSON 序列化健壮性
+  - [x] 新增 `_safe_serialize()` 辅助函数（递归转换 lark-oapi 对象为基础类型）
+  - [x] `_block_to_dict()` 返回值经过 `_safe_serialize` 处理
+  - [x] `_read_blocks()` 的 `json.dumps` 增加 try-except 保护
+  - [x] 编写 16 个测试（各种类型序列化、嵌套对象、block 序列化）
+  - [x] Git commit: `fix: #9 read blocks JSON 序列化健壮性`
+- [x] 更新文档（REQUIREMENTS / ARCHITECTURE / DEVLOG / ISSUES_AND_IMPROVEMENTS）
+- [x] 运行全部测试确保不回归
+- [x] Git commit: `docs: 更新 DEVLOG + ISSUES_AND_IMPROVEMENTS`
+
+#### 实现细节
+
+##### Bug #4: 嵌套代码块解析
+- 原逻辑：`startswith('```')` 匹配结束标记，无法区分不同 backtick 数量
+- 新逻辑：计算开始行 backtick 数量 `fence_len`，结束行必须有 ≥ fence_len 个 backtick 且之后无非空字符
+- 修改文件：`scripts/md_to_blocks.py`（约 595 行附近，+12 -5 行）
+
+##### Bug #7: read blocks 表格内容读取
+- `_block_to_dict()` 新增 block_type=31 处理：提取 table.property（row_size/column_size/header_row）和 table.cells
+- `_read_blocks()` 构建 `all_block_dicts` 查找表，对 table block 的 cells 递归解析子 block 文本
+- 输出新增 `table.cell_contents` 数组
+- 修改文件：`scripts/feishu_doc.py`（_block_to_dict + _read_blocks）
+
+##### Bug #9: JSON 序列化健壮性
+- 新增 `_safe_serialize()` 函数：递归处理 dict/list/基础类型/lark-oapi 对象/其他类型
+- `_block_to_dict()` 最后 `return _safe_serialize(result)`
+- `_read_blocks()` 的 `json.dumps` 增加 try-except，失败时 fallback 到 `_safe_serialize` 再试
+- 修改文件：`scripts/feishu_doc.py`（新增 _safe_serialize + 修改 _block_to_dict + _read_blocks）
+
+#### 测试结果
+- `tests/test_md_to_blocks.py`: 70/70 通过（63 旧 + 7 新 Bug #4 测试）
+- `tests/test_feishu_doc_p0.py`: 6/6 通过（回归检查）
+- `tests/test_feishu_doc_p1.py`: 26/26 通过（回归检查）
+- `tests/test_feishu_doc_p2.py`: 5/5 通过（回归检查）
+- `tests/test_feishu_doc_bug7.py`: 5/5 通过（新增）
+- `tests/test_feishu_doc_bug9.py`: 16/16 通过（新增）
+- 总计: 128/128 全部通过
+
+---
+
 *开始日期: 2026-02-28*

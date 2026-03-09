@@ -338,6 +338,34 @@ Response: { "code": 0, "data": { "block": {...}, "document_revision_id": N } }
 - 错误码 `99991400`（rate limit）时，追加提示：`触发频率限制，将自动重试`
 - 作为防御性提示，即使 P0-1 已自动拆分，仍在错误信息中给出诊断线索
 
+### 嵌套代码块解析（Bug #4）
+
+`md_to_blocks.py` 的代码块解析支持 N-backtick fence（N ≥ 3）：
+- 记录开始 fence 的 backtick 数量（`fence_len`）
+- 结束标记：行 strip 后以 ≥ fence_len 个 backtick 开头，且之后无非空字符
+- 支持 4 backtick 包裹 3 backtick 等嵌套场景
+- 无结束标记时，剩余内容全部作为代码块内容
+
+### read blocks 表格内容读取（Bug #7）
+
+`_block_to_dict()` 增加对 table block（block_type=31）的处理：
+- 提取 `block.table.property`（row_size, column_size, header_row）
+- 提取 `block.table.cells`（cell block ID 列表）
+
+`_read_blocks()` 增加 parent-child 关系解析：
+- 构建 block_id → block_dict 查找表
+- 对 table block 的 cells，递归查找 cell → child text block 的内容
+- 输出 `table.cell_contents` 数组，包含每个 cell 的文本内容
+
+### read blocks JSON 序列化健壮性（Bug #9）
+
+新增 `_safe_serialize()` 辅助函数：
+- 递归处理 dict/list/基础类型
+- lark-oapi 对象（有 `__dict__`）转换为 dict（排除 `_` 前缀属性）
+- 其他未知类型降级为 `str()`
+- `_block_to_dict()` 最后对 result 做 `_safe_serialize` 处理
+- `_read_blocks()` 的 `json.dumps` 增加 try-except，失败时输出有意义的错误到 stderr
+
 ---
 
 *创建日期: 2026-02-28*
