@@ -246,8 +246,33 @@
 - [x] P0-2: `feishu_doc.py` — `_write_table_block()` Step 1 增加 retry + 空响应处理
 - [x] P0-3: `feishu_doc.py` — `_write_blocks_to_doc()` 表格间自动 3 秒延迟
 - [x] P0-2/P0-3: 编写 mock 测试或语法检查
-- [ ] 更新文档（REQUIREMENTS / ARCHITECTURE / DEVLOG）
-- [ ] Git 提交
+- [x] 更新文档（REQUIREMENTS / ARCHITECTURE / DEVLOG）
+- [x] Git 提交
+
+#### 实现细节
+
+##### P0-1: 表格行数自动拆分
+- 新增 `MAX_TABLE_ROWS = 9` 常量和 `_split_table()` 函数
+- `_parse_table()` 检测行数 > 9 时返回 block 列表（而非单个 dict）
+- `markdown_to_blocks()` 支持 `_parse_table` 返回 list（用 `isinstance` 判断）
+- 拆分策略：header 复制 + 数据行按 8 行一组 + 续表间插入"（续表）"文本 block
+- 每个子表格独立计算 column_widths
+
+##### P0-2: 表格创建 retry + 空响应处理
+- Step 1 创建空表格增加最多 3 次 retry，指数退避（2s, 4s）
+- 识别 rate limit：API code 99991400 或 msg 含 "rate"
+- `response.data` 为 None 时优雅返回 True（表格已创建，只是无 cell ID）
+- Cell 写入时 HTTP 200 但 `resp.text` 为空也触发 retry
+
+##### P0-3: 表格间自动延迟
+- `_write_blocks_to_doc()` 增加 `table_written` 标志
+- 第一个表格不延迟，后续表格写入前 `time.sleep(3)`
+- 普通文本 block 不触发延迟
+
+#### 测试结果
+- `tests/test_md_to_blocks.py`: 63/63 通过（56 旧 + 7 新 P0-1 测试）
+- `tests/test_feishu_doc_p0.py`: 6/6 通过（3 P0-2 + 3 P0-3 mock 测试）
+- 总计: 69/69 全部通过
 
 ---
 
