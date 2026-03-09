@@ -276,4 +276,76 @@
 
 ---
 
+## Phase 7: P1 大文档体验改进
+
+### 2026-03-09 Session: P1 改进
+
+#### 问题背景
+- 大文档（500+ 行、多表格）一次性写入容易触发 rate limit，中途失败无法恢复
+- 写入过程无进度反馈，用户不知道当前进度
+- 创建文档后需手动 add-member，流程繁琐
+
+#### 任务拆解
+- [x] P1-1: `feishu_doc.py` — `_write_blocks_to_doc()` 大文档自动分段写入
+  - [x] 实现 `_split_into_chunks()` 函数：按安全边界（表格前后、heading 前）分段
+  - [x] 每段最多 30 个 regular blocks，表格单独一个 chunk
+  - [x] chunk 间加延迟（普通 1s，表格 3s）
+  - [x] 编写测试
+- [x] P1-2: `feishu_doc.py` — 写入进度反馈
+  - [x] 每写完一个 chunk 输出进度到 stderr
+  - [x] 编写测试验证 stderr 输出
+- [x] P1-3: `feishu_doc.py` — 断点续传
+  - [x] `_write_blocks_to_doc()` 新增 `resume_from` 参数
+  - [x] write / create-and-write argparse 增加 `--resume-from`
+  - [x] 失败时输出续传命令
+  - [x] 编写测试
+- [x] P1-4: `feishu_doc.py` — create-and-write 自动添加协作者
+  - [x] 提取 `_add_member()` 内部函数
+  - [x] `cmd_add_member` 改为 wrapper
+  - [x] `create-and-write` 新增 `--add-member` / `--member-perm` 参数
+  - [x] 编写测试
+- [x] 更新文档（REQUIREMENTS / ARCHITECTURE / DEVLOG）
+- [x] Git 提交
+
+#### 实现细节
+
+##### P1-1: 大文档自动分段写入
+- 新增 `_split_into_chunks()` 函数，将 block_dicts 按安全边界拆分为 chunk 列表
+- 安全边界：表格前后（每个 table 独立一个 chunk）、heading 前（heading 开始新 chunk）
+- 每个 regular chunk 最多 `CHUNK_MAX_BLOCKS = 30` 个 block
+- `_write_blocks_to_doc()` 重构为遍历 chunk 列表，逐 chunk 写入
+- 延迟策略：普通 chunk 间 1s（`CHUNK_DELAY = 1`），表格 chunk 间 3s（`TABLE_DELAY = 3`，兼容 P0-3）
+
+##### P1-2: 写入进度反馈
+- 每写完一个 chunk 前输出进度到 stderr：`[N/total] Writing chunk N (X blocks)...` 或 `(table)`
+- 全部写完后输出：`[total/total] All chunks written successfully.`
+- 使用 `print(..., file=sys.stderr)`，不影响 stdout 的 JSON 输出
+
+##### P1-3: 断点续传
+- `_write_blocks_to_doc()` 新增 `resume_from` 参数（默认 0），跳过序号 < resume_from 的 chunk
+- 跳过的 table chunk 仍会设置 `table_written = True`，确保后续延迟逻辑正确
+- 失败时输出：`ERROR: Failed at chunk X/Y. Resume with: --resume-from X`
+- write 和 create-and-write 的 argparse 均增加 `--resume-from` 参数
+
+##### P1-4: create-and-write 自动添加协作者
+- 提取 `_add_member(client, doc_id, open_id, perm)` 内部函数（返回 bool）
+- `cmd_add_member(args)` 改为调用 `_add_member()` 的 wrapper
+- `cmd_create_and_write()` 在创建文档后、写入内容前调用 `_add_member()`
+- 添加失败不阻断写入（仅输出 warning 到 stderr）
+- argparse: `--add-member` (open_id) + `--member-perm` (full_access/edit/view, 默认 full_access)
+
+#### 测试结果
+- `tests/test_md_to_blocks.py`: 63/63 通过（无变更）
+- `tests/test_feishu_doc_p0.py`: 6/6 通过（回归检查）
+- `tests/test_feishu_doc_p1.py`: 26/26 通过（新增）
+  - TestSplitIntoChunks: 8 tests（分段逻辑）
+  - TestChunkedWriteAndProgress: 5 tests（写入+进度）
+  - TestResumeFrom: 5 tests（断点续传）
+  - TestAddMemberExtraction: 4 tests（_add_member 提取）
+  - TestCreateAndWriteAddMember: 2 tests（argparse 参数）
+  - TestP0Regression: 2 tests（P0 兼容性）
+- 总计: 95/95 全部通过
+
+---
+
 *开始日期: 2026-02-28*

@@ -194,6 +194,35 @@
 - `feishu_doc.py` 的 `_write_blocks_to_doc()` 连续写入多个表格时，表格之间自动加 3 秒延迟
 - 只有表格需要延迟，普通文本 block 不需要
 
+### Phase 7: P1 大文档体验改进
+
+> 详细背景见 `docs/ISSUES_AND_IMPROVEMENTS.md`
+
+#### F7.1 大文档自动分段写入（P1-1）
+- `_write_blocks_to_doc()` 自动将 block_dicts 按"安全边界"分段写入
+- 安全边界：表格前后、heading 前
+- 每段（chunk）最多 30 个 regular blocks，表格单独算一个 chunk
+- 每段写完后加 1-2 秒延迟，表格间延迟保持 P0-3 的 3 秒
+- 不破坏现有表格间延迟逻辑
+
+#### F7.2 写入进度反馈（P1-2）
+- 每写完一个 chunk/segment，输出进度到 stderr
+- 格式: `[3/12] Writing chunk 3 (5 blocks + 1 table)...`
+- 完成时: `[12/12] All chunks written successfully.`
+- 使用 `print(..., file=sys.stderr)`，不影响 stdout JSON 输出
+
+#### F7.3 断点续传（P1-3）
+- 新增 `--resume-from` 参数（chunk 序号），从指定 chunk 开始写入
+- 写入失败时输出已完成 chunk 数和续传命令到 stderr
+- resume 时使用 append 模式，从上次失败位置继续
+- write 和 create-and-write 子命令均支持
+
+#### F7.4 create-and-write 自动添加协作者（P1-4）
+- `create-and-write` 新增 `--add-member` 参数（open_id）
+- 可选 `--member-perm` 参数（默认 `full_access`）
+- 创建文档后、写入内容前自动添加协作者
+- 提取 `_add_member()` 内部函数，`cmd_add_member` 改为 wrapper
+
 ## Issues
 
 （开发过程中发现的问题记录在此）

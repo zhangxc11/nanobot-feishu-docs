@@ -295,6 +295,41 @@ Response: { "code": 0, "data": { "block": {...}, "document_revision_id": N } }
 - 后续表格写入前 sleep 3 秒
 - 普通文本 block 不触发延迟
 
+### 大文档自动分段写入
+
+`_write_blocks_to_doc()` 将 block_dicts 按"安全边界"拆分为 chunk 后逐段写入：
+
+**分段策略**：
+1. 先按 block 类型分成 segment（连续 regular blocks 为一组，每个 table 独立一组）
+2. 对 regular segment 进一步按"安全边界"拆分：heading 前断开
+3. 每个 chunk 最多 30 个 regular blocks（`CHUNK_MAX_BLOCKS = 30`）
+4. 表格单独算一个 chunk
+
+**延迟策略**：
+- 表格 chunk 间保持 P0-3 的 3 秒延迟
+- 普通 chunk 间加 1 秒延迟（`CHUNK_DELAY = 1`）
+- 第一个 chunk 不延迟
+
+### 写入进度反馈
+
+每写完一个 chunk 输出进度到 stderr（不影响 stdout JSON）：
+- 格式: `[3/12] Writing chunk 3 (5 blocks)...` 或 `[3/12] Writing chunk 3 (table)...`
+- 完成: `[12/12] All chunks written successfully.`
+
+### 断点续传
+
+`_write_blocks_to_doc()` 接受 `resume_from` 参数（默认 0）：
+- 跳过序号 < resume_from 的 chunk
+- 失败时输出: `ERROR: Failed at chunk 8/12. Resume with: --resume-from 8`
+- write 和 create-and-write 子命令通过 `--resume-from` argparse 参数传递
+
+### create-and-write 自动添加协作者
+
+提取 `_add_member(client, doc_id, open_id, perm)` 内部函数：
+- `cmd_add_member(args)` 改为调用 `_add_member()` 的 wrapper
+- `cmd_create_and_write()` 在创建文档后、写入内容前调用 `_add_member()`
+- 通过 `--add-member` 和 `--member-perm` 参数传递
+
 ---
 
 *创建日期: 2026-02-28*
