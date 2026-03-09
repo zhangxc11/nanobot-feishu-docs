@@ -87,9 +87,11 @@ python3 skills/feishu-docs/scripts/feishu_doc.py read --doc DOC_ID --format bloc
 Page block children:
   [0] type=3  id=doxcnXXX  "一级标题"
   [1] type=2  id=doxcnYYY  "正文段落"
-  [2] type=31 id=doxcnZZZ  [TABLE]
+  [2] type=31 id=doxcnZZZ  [TABLE 3x4]  (含 cell 文本内容)
   [3] type=4  id=doxcnAAA  "二级标题"
 ```
+
+> **表格读取**：`read --format blocks` 支持读取表格 cell 的文本内容（table 属性、cell_contents 字段），可用于诊断表格写入结果。
 
 ### patch-block — 原地更新 block 内容
 
@@ -299,7 +301,7 @@ python3 skills/feishu-docs/scripts/feishu_doc.py add-member --doc DOC_ID --open-
 | 普通段落 | 文本 |
 | `- item` | 无序列表 |
 | `1. item` | 有序列表 |
-| `` ```lang ... ``` `` | 代码块（支持语言高亮） |
+| `` ```lang ... ``` `` | 代码块（支持语言高亮，支持嵌套：外层用 ```````` 可包裹内部 ``````` ） |
 | `> quote` | 引用 |
 | `- [ ] todo` / `- [x] done` | 待办事项 |
 | `---` | 分割线 |
