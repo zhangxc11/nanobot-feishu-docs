@@ -511,14 +511,20 @@ def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -
 
         if is_rate_limited and attempt < max_create_retries - 1:
             wait = 2 * (2 ** attempt)  # 2s, 4s
-            print(f"Table create rate limited, retry {attempt+1}/{max_create_retries} "
-                  f"after {wait}s", file=sys.stderr)
+            print(f"Table create rate limited (rows={row_count}, cols={col_count}), "
+                  f"retry {attempt+1}/{max_create_retries} after {wait}s — "
+                  f"NOTE: 触发频率限制，将自动重试", file=sys.stderr)
             time.sleep(wait)
         else:
-            # Non-retryable error or last attempt
+            # Non-retryable error or last attempt — enhanced error message
+            err_msg = f"Table create failed (rows={row_count}, cols={col_count}): [{response.code}] {response.msg}"
+            if response.code == 1770001 and row_count > 9:
+                err_msg += " — NOTE: 飞书限制单次创建最多 9 行"
+            elif response.code == 99991400:
+                err_msg += " — NOTE: 触发频率限制，将自动重试"
             print(json.dumps({
                 "success": False,
-                "error": f"Table create failed: [{response.code}] {response.msg}"
+                "error": err_msg
             }, ensure_ascii=False), file=sys.stderr)
             return False
 
