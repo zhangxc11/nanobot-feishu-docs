@@ -243,9 +243,9 @@
 #### 任务拆解
 - [x] P0-1: `md_to_blocks.py` — 表格行数自动拆分（>9 行拆分为多个子表格）
 - [x] P0-1: 编写单元测试（9行不拆分、10行拆2个、17行拆3个）
-- [ ] P0-2: `feishu_doc.py` — `_write_table_block()` Step 1 增加 retry + 空响应处理
-- [ ] P0-3: `feishu_doc.py` — `_write_blocks_to_doc()` 表格间自动 3 秒延迟
-- [ ] P0-2/P0-3: 编写 mock 测试或语法检查
+- [x] P0-2: `feishu_doc.py` — `_write_table_block()` Step 1 增加 retry + 空响应处理
+- [x] P0-3: `feishu_doc.py` — `_write_blocks_to_doc()` 表格间自动 3 秒延迟
+- [x] P0-2/P0-3: 编写 mock 测试或语法检查
 - [ ] 更新文档（REQUIREMENTS / ARCHITECTURE / DEVLOG）
 - [ ] Git 提交
 
