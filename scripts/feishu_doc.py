@@ -173,7 +173,8 @@ def cmd_write(args):
         return 1
 
     # Separate table blocks from regular blocks (tables need special handling)
-    return _write_blocks_to_doc(client, args.doc, block_dicts)
+    resume_from = getattr(args, 'resume_from', 0) or 0
+    return _write_blocks_to_doc(client, args.doc, block_dicts, resume_from=resume_from)
 
 
 def _clear_document(client, doc_id: str) -> int:
@@ -245,49 +246,91 @@ def _clear_document(client, doc_id: str) -> int:
     return 0
 
 
-def _write_blocks_to_doc(client, doc_id: str, block_dicts: list) -> int:
+def _write_blocks_to_doc(client, doc_id: str, block_dicts: list,
+                         resume_from: int = 0) -> int:
     """Write block dicts to a document, handling both regular blocks and tables.
+
+    Automatically splits block_dicts into chunks at safe boundaries (before tables,
+    before headings) and writes them with appropriate delays to avoid rate limiting.
 
     Tables need special two-step creation:
     1. Create empty table block with row_size/column_size
     2. Fill each cell with content via descendant API
 
+    Args:
+        client: Feishu API client
+        doc_id: Document ID
+        block_dicts: List of block dicts from markdown_to_blocks
+        resume_from: Chunk index to resume from (0-based, default 0 = start from beginning)
+
     Returns exit code (0=success, 1=failure).
     """
-    # Split block_dicts into segments: consecutive regular blocks vs table blocks
-    segments = []
-    current_regular = []
+    # Split into chunks at safe boundaries
+    chunks = _split_into_chunks(block_dicts)
+    total_chunks = len(chunks)
 
-    for bd in block_dicts:
-        if bd.get("block_type") == BLOCK_TYPE_TABLE:
-            if current_regular:
-                segments.append(("regular", current_regular))
-                current_regular = []
-            segments.append(("table", bd))
-        else:
-            current_regular.append(bd)
-
-    if current_regular:
-        segments.append(("regular", current_regular))
+    if total_chunks == 0:
+        print(json.dumps({"success": False, "error": "No content to write"}), ensure_ascii=False)
+        return 1
 
     total_written = 0
     table_written = False  # Track if we've already written a table (for delay logic)
 
-    for seg_type, seg_data in segments:
-        if seg_type == "regular":
-            count = _write_regular_blocks(client, doc_id, seg_data)
+    for chunk_idx, chunk in enumerate(chunks):
+        # P1-3: Skip chunks before resume_from
+        if chunk_idx < resume_from:
+            # Still track table_written for correct delay logic
+            if chunk["type"] == "table":
+                table_written = True
+            continue
+
+        chunk_type = chunk["type"]
+        chunk_data = chunk["data"]
+
+        # P1-2: Progress feedback to stderr
+        if chunk_type == "table":
+            desc = "table"
+        else:
+            desc = f"{len(chunk_data)} blocks"
+        print(f"[{chunk_idx + 1}/{total_chunks}] Writing chunk {chunk_idx + 1} ({desc})...",
+              file=sys.stderr)
+
+        # Apply delays between chunks
+        if chunk_idx > 0 and chunk_idx >= resume_from:
+            if chunk_type == "table":
+                # P0-3: Table delay — 3s if a table was already written
+                if table_written:
+                    time.sleep(3)
+            else:
+                # P1-1: Regular chunk delay — 1s between non-first chunks
+                # (only if we actually wrote something before)
+                if total_written > 0 or table_written:
+                    time.sleep(1)
+
+        # Write the chunk
+        if chunk_type == "regular":
+            count = _write_regular_blocks(client, doc_id, chunk_data)
             if count < 0:
+                # P1-3: Output resume hint on failure
+                print(f"ERROR: Failed at chunk {chunk_idx + 1}/{total_chunks}. "
+                      f"Resume with: --resume-from {chunk_idx}",
+                      file=sys.stderr)
                 return 1
             total_written += count
-        elif seg_type == "table":
-            # P0-3: Add delay between consecutive table writes to avoid rate limiting
-            if table_written:
-                time.sleep(3)
-            ok = _write_table_block(client, doc_id, seg_data)
+        elif chunk_type == "table":
+            ok = _write_table_block(client, doc_id, chunk_data)
             if not ok:
+                # P1-3: Output resume hint on failure
+                print(f"ERROR: Failed at chunk {chunk_idx + 1}/{total_chunks}. "
+                      f"Resume with: --resume-from {chunk_idx}",
+                      file=sys.stderr)
                 return 1
             total_written += 1
             table_written = True
+
+    # P1-2: Final progress message
+    print(f"[{total_chunks}/{total_chunks}] All chunks written successfully.",
+          file=sys.stderr)
 
     result = {
         "success": True,
@@ -297,6 +340,62 @@ def _write_blocks_to_doc(client, doc_id: str, block_dicts: list) -> int:
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
+
+
+# ── Chunk size constants ──────────────────────────────────────────────
+
+CHUNK_MAX_BLOCKS = 30   # Max regular blocks per chunk
+CHUNK_DELAY = 1         # Seconds between regular chunks
+TABLE_DELAY = 3         # Seconds between table chunks (P0-3 compatible)
+
+# Heading block types that serve as safe chunk boundaries
+_HEADING_TYPES = {3, 4, 5, 6, 7, 8, 9, 10, 11}  # heading1..heading9
+
+
+def _split_into_chunks(block_dicts: list) -> list:
+    """Split block_dicts into chunks at safe boundaries.
+
+    Safe boundaries:
+    - Before/after each table block (each table is its own chunk)
+    - Before heading blocks
+    - When a regular chunk reaches CHUNK_MAX_BLOCKS
+
+    Returns a list of chunk dicts:
+        [{"type": "regular", "data": [block_dict, ...]},
+         {"type": "table", "data": table_block_dict},
+         ...]
+    """
+    chunks = []
+    current_regular = []
+
+    def _flush_regular():
+        nonlocal current_regular
+        if current_regular:
+            chunks.append({"type": "regular", "data": current_regular})
+            current_regular = []
+
+    for bd in block_dicts:
+        bt = bd.get("block_type")
+
+        if bt == BLOCK_TYPE_TABLE:
+            # Table is always its own chunk
+            _flush_regular()
+            chunks.append({"type": "table", "data": bd})
+
+        elif bt in _HEADING_TYPES:
+            # Heading starts a new chunk (safe boundary)
+            _flush_regular()
+            current_regular.append(bd)
+
+        else:
+            # Regular block — check if current chunk is full
+            if len(current_regular) >= CHUNK_MAX_BLOCKS:
+                _flush_regular()
+            current_regular.append(bd)
+
+    _flush_regular()
+
+    return chunks
 
 
 def _write_regular_blocks(client, doc_id: str, block_dicts: list) -> int:
@@ -752,6 +851,15 @@ def cmd_create_and_write(args):
 
     doc_id = create_response.data.document.document_id
 
+    # P1-4: Auto add member after creating document (before writing content)
+    add_member_id = getattr(args, 'add_member', None)
+    if add_member_id:
+        member_perm = getattr(args, 'member_perm', 'full_access') or 'full_access'
+        member_ok = _add_member(client, doc_id, add_member_id, member_perm)
+        if not member_ok:
+            print(f"Warning: Failed to add member {add_member_id}, continuing with write...",
+                  file=sys.stderr)
+
     # Step 2: Convert and write content (reuse shared write logic)
     block_dicts = markdown_to_blocks(markdown)
     if not block_dicts:
@@ -766,7 +874,8 @@ def cmd_create_and_write(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    return _write_blocks_to_doc(client, doc_id, block_dicts)
+    resume_from = getattr(args, 'resume_from', 0) or 0
+    return _write_blocks_to_doc(client, doc_id, block_dicts, resume_from=resume_from)
 
 
 # ── Helper functions ──────────────────────────────────────────────────
@@ -1079,23 +1188,39 @@ def cmd_add_comment(args):
         return 1
 
 
-def cmd_add_member(args):
-    """Add a collaborator to a Feishu document."""
-    client = create_client(args.app)
+def _add_member(client, doc_id: str, open_id: str, perm: str = "full_access") -> bool:
+    """Add a collaborator to a Feishu document (internal function).
 
+    Args:
+        client: Feishu API client
+        doc_id: Document ID
+        open_id: User open_id (ou_xxx)
+        perm: Permission level (full_access / edit / view)
+
+    Returns:
+        True on success, False on failure.
+    """
     request = CreatePermissionMemberRequest.builder() \
-        .token(args.doc) \
+        .token(doc_id) \
         .type("docx") \
         .request_body(BaseMember.builder()
             .member_type("openid")
-            .member_id(args.open_id)
-            .perm(args.perm)
+            .member_id(open_id)
+            .perm(perm)
             .build()) \
         .build()
 
     response = client.drive.v1.permission_member.create(request)
+    return response.success()
 
-    if response.success():
+
+def cmd_add_member(args):
+    """Add a collaborator to a Feishu document."""
+    client = create_client(args.app)
+
+    success = _add_member(client, args.doc, args.open_id, args.perm)
+
+    if success:
         print(json.dumps({
             "success": True,
             "document_id": args.doc,
@@ -1107,7 +1232,7 @@ def cmd_add_member(args):
     else:
         print(json.dumps({
             "success": False,
-            "error": f"[{response.code}] {response.msg}",
+            "error": "Failed to add member",
         }, ensure_ascii=False))
         return 1
 
@@ -1348,6 +1473,8 @@ def main():
     write_parser.add_argument("--markdown-file", help="Path to Markdown file")
     write_parser.add_argument("--mode", choices=["append", "overwrite"], default="append",
                               help="Write mode: append (default) or overwrite (clear first)")
+    write_parser.add_argument("--resume-from", type=int, default=0,
+                              help="Resume from chunk index (0-based, for continuing after failure)")
 
     # read
     read_parser = subparsers.add_parser("read", help="Read document content")
@@ -1362,6 +1489,13 @@ def main():
     caw_parser.add_argument("--folder", help="Target folder token")
     caw_parser.add_argument("--markdown", help="Markdown content string")
     caw_parser.add_argument("--markdown-file", help="Path to Markdown file")
+    caw_parser.add_argument("--resume-from", type=int, default=0,
+                            help="Resume from chunk index (0-based, for continuing after failure)")
+    caw_parser.add_argument("--add-member",
+                            help="Auto-add collaborator by open_id (ou_xxx) after creating doc")
+    caw_parser.add_argument("--member-perm", choices=["full_access", "edit", "view"],
+                            default="full_access",
+                            help="Permission for --add-member (default: full_access)")
 
     # list-comments
     lc_parser = subparsers.add_parser("list-comments", help="List comments on a document")
