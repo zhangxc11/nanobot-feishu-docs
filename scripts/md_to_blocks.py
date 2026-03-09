@@ -591,17 +591,27 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
                     blocks.append(result)
             continue
 
-        # ── Code block: ``` ──
-        if line.strip().startswith('```'):
-            lang_str = line.strip()[3:].strip().lower()
+        # ── Code block: ``` (supports N-backtick fences, N >= 3) ──
+        stripped = line.strip()
+        fence_len = 0
+        while fence_len < len(stripped) and stripped[fence_len] == '`':
+            fence_len += 1
+        if fence_len >= 3:
+            lang_str = stripped[fence_len:].strip().lower()
             code_lang = CODE_LANGUAGES.get(lang_str)
             code_lines = []
             i += 1
-            while i < len(lines) and not lines[i].strip().startswith('```'):
+            while i < len(lines):
+                end_stripped = lines[i].strip()
+                end_fence = 0
+                while end_fence < len(end_stripped) and end_stripped[end_fence] == '`':
+                    end_fence += 1
+                if end_fence >= fence_len and end_stripped[end_fence:].strip() == '':
+                    break
                 code_lines.append(lines[i])
                 i += 1
             if i < len(lines):
-                i += 1  # skip closing ```
+                i += 1  # skip closing fence
 
             code_content = '\n'.join(code_lines)
             # Code blocks use plain text_run, no inline formatting

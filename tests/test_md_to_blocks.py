@@ -590,5 +590,71 @@ class TestTableSplitting(unittest.TestCase):
         self.assertEqual(len(text_blocks_after), 1)
 
 
+class TestNestedCodeBlocks(unittest.TestCase):
+    """Test Bug #4: Nested code block parsing with N-backtick fences."""
+
+    def test_normal_3_backtick_code_block(self):
+        """Standard 3-backtick code block should still work."""
+        md = "```python\nprint('hello')\n```"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_CODE)
+        self.assertEqual(blocks[0]["code"]["elements"][0]["text_run"]["content"], "print('hello')")
+
+    def test_4_backtick_wrapping_3_backtick(self):
+        """4-backtick fence wrapping 3-backtick content — inner ``` should NOT end the block."""
+        md = "````\n```python\nprint('hello')\n```\n````"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_CODE)
+        content = blocks[0]["code"]["elements"][0]["text_run"]["content"]
+        self.assertIn("```python", content)
+        self.assertIn("print('hello')", content)
+        self.assertIn("```", content)
+
+    def test_5_backtick_wrapping_4_backtick(self):
+        """5-backtick fence wrapping 4-backtick content."""
+        md = "`````\n````\nsome code\n````\n`````"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_CODE)
+        content = blocks[0]["code"]["elements"][0]["text_run"]["content"]
+        self.assertIn("````", content)
+        self.assertIn("some code", content)
+
+    def test_no_closing_fence_eof(self):
+        """Code block without closing fence — rest of content becomes code."""
+        md = "```python\nprint('hello')\nmore code"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_CODE)
+        content = blocks[0]["code"]["elements"][0]["text_run"]["content"]
+        self.assertIn("print('hello')", content)
+        self.assertIn("more code", content)
+
+    def test_4_backtick_with_language(self):
+        """4-backtick fence with language specifier."""
+        md = "````python\ncode here\n````"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["code"]["style"]["language"], 49)  # python
+
+    def test_closing_fence_must_match_or_exceed_opening(self):
+        """Closing fence with more backticks than opening should also close."""
+        md = "```\ncode\n````"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_CODE)
+        self.assertEqual(blocks[0]["code"]["elements"][0]["text_run"]["content"], "code")
+
+    def test_content_after_nested_code_block(self):
+        """Content after a nested code block should be parsed normally."""
+        md = "````\n```\ninner\n```\n````\n\n# Title"
+        blocks = markdown_to_blocks(md)
+        types = [b["block_type"] for b in blocks]
+        self.assertIn(BLOCK_TYPE_CODE, types)
+        self.assertIn(BLOCK_TYPE_HEADING1, types)
+
+
 if __name__ == "__main__":
     unittest.main()
