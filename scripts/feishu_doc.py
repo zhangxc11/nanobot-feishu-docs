@@ -271,6 +271,7 @@ def _write_blocks_to_doc(client, doc_id: str, block_dicts: list) -> int:
         segments.append(("regular", current_regular))
 
     total_written = 0
+    table_written = False  # Track if we've already written a table (for delay logic)
 
     for seg_type, seg_data in segments:
         if seg_type == "regular":
@@ -279,10 +280,14 @@ def _write_blocks_to_doc(client, doc_id: str, block_dicts: list) -> int:
                 return 1
             total_written += count
         elif seg_type == "table":
+            # P0-3: Add delay between consecutive table writes to avoid rate limiting
+            if table_written:
+                time.sleep(3)
             ok = _write_table_block(client, doc_id, seg_data)
             if not ok:
                 return 1
             total_written += 1
+            table_written = True
 
     result = {
         "success": True,
@@ -366,7 +371,7 @@ def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -
     if row_count == 0 or col_count == 0:
         return True  # Skip empty tables
 
-    # Step 1: Create empty table block via SDK
+    # Step 1: Create empty table block via SDK (with retry)
     table_block = Block()
     table_block.block_type = BLOCK_TYPE_TABLE
 
@@ -390,17 +395,48 @@ def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -
         ) \
         .build()
 
-    response = client.docx.v1.document_block_children.create(request)
+    # Retry logic for table creation (rate limit / transient errors)
+    max_create_retries = 3
+    response = None
+    for attempt in range(max_create_retries):
+        response = client.docx.v1.document_block_children.create(request)
 
-    if not response.success():
+        if response.success():
+            break
+
+        # Check for rate limit errors
+        is_rate_limited = (
+            response.code == 99991400
+            or "rate" in (response.msg or "").lower()
+        )
+
+        if is_rate_limited and attempt < max_create_retries - 1:
+            wait = 2 * (2 ** attempt)  # 2s, 4s
+            print(f"Table create rate limited, retry {attempt+1}/{max_create_retries} "
+                  f"after {wait}s", file=sys.stderr)
+            time.sleep(wait)
+        else:
+            # Non-retryable error or last attempt
+            print(json.dumps({
+                "success": False,
+                "error": f"Table create failed: [{response.code}] {response.msg}"
+            }, ensure_ascii=False), file=sys.stderr)
+            return False
+
+    # Handle empty response (API returned success but no data)
+    if not response or not response.success():
         print(json.dumps({
             "success": False,
-            "error": f"Table create failed: [{response.code}] {response.msg}"
+            "error": "Table create failed after retries"
         }, ensure_ascii=False), file=sys.stderr)
         return False
 
-    # Step 2: Get cell block IDs from response
-    created_blocks = response.data.children if response.data else []
+    # Step 2: Get cell block IDs from response (handle empty/null data)
+    if not response.data:
+        print("Warning: Table created but response data is empty", file=sys.stderr)
+        return True
+
+    created_blocks = response.data.children if response.data.children else []
     if not created_blocks:
         print("Warning: Table created but no block data returned", file=sys.stderr)
         return True
@@ -475,7 +511,20 @@ def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -
             for attempt in range(max_retries):
                 try:
                     resp = http_requests.post(url, headers=headers, json=body)
-                    if resp.status_code == 200 and resp.text:
+                    if resp.status_code == 200:
+                        if not resp.text:
+                            # Empty response — treat as transient error, retry
+                            if attempt < max_retries - 1:
+                                wait = 0.5 * (2 ** attempt)
+                                print(f"Empty response on cell [{row_idx},{col_idx}], "
+                                      f"retry {attempt+1}/{max_retries} after {wait:.1f}s",
+                                      file=sys.stderr)
+                                time.sleep(wait)
+                                continue
+                            else:
+                                print(f"Warning: Empty response on cell [{row_idx},{col_idx}] "
+                                      f"after {max_retries} retries", file=sys.stderr)
+                                break
                         data = resp.json()
                         if data.get("code") == 0:
                             success = True
