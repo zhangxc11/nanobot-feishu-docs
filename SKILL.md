@@ -15,6 +15,25 @@ skills/feishu-docs/scripts/feishu_doc.py
 
 ---
 
+## 命令速查
+
+| 命令 | 完整语法 |
+|------|----------|
+| create | `python3 feishu_doc.py create --title TITLE [--folder TOKEN] [--app ST\|lab]` |
+| write | `python3 feishu_doc.py write --doc DOC_ID --markdown TEXT \| --markdown-file FILE [--mode append\|overwrite] [--resume-from N] [--app ST\|lab]` |
+| read | `python3 feishu_doc.py read --doc DOC_ID [--format raw\|blocks] [--app ST\|lab]` |
+| create-and-write | `python3 feishu_doc.py create-and-write --title TITLE --markdown TEXT \| --markdown-file FILE [--folder TOKEN] [--add-member ou_xxx] [--member-perm full_access\|edit\|view] [--resume-from N] [--app ST\|lab]` |
+| patch-block | `python3 feishu_doc.py patch-block --doc DOC_ID --block BLOCK_ID --text TEXT [--app ST\|lab]` |
+| delete-blocks | `python3 feishu_doc.py delete-blocks --doc DOC_ID --start N --end N [--parent BLOCK_ID] [--app ST\|lab]` |
+| insert-blocks | `python3 feishu_doc.py insert-blocks --doc DOC_ID --index N --markdown TEXT \| --markdown-file FILE [--parent BLOCK_ID] [--app ST\|lab]` |
+| list-comments | `python3 feishu_doc.py list-comments --doc DOC_ID [--status all\|solved\|unsolved] [--app ST\|lab]` |
+| reply-comment | `python3 feishu_doc.py reply-comment --doc DOC_ID --comment COMMENT_ID --text TEXT [--app ST\|lab]` |
+| resolve-comment | `python3 feishu_doc.py resolve-comment --doc DOC_ID --comment COMMENT_ID [--app ST\|lab]` |
+| add-comment | `python3 feishu_doc.py add-comment --doc DOC_ID --text TEXT [--quote QUOTE] [--is-whole] [--app ST\|lab]` |
+| add-member | `python3 feishu_doc.py add-member --doc DOC_ID --open-id ou_xxx [--perm full_access\|edit\|view] [--app ST\|lab]` |
+
+---
+
 ## ⚠️ 编辑原则：优先局部编辑，避免 overwrite
 
 > **修改已有文档时，应优先使用局部编辑命令（patch-block / delete-blocks / insert-blocks），而非 overwrite 全量覆盖。**
@@ -159,6 +178,12 @@ python3 skills/feishu-docs/scripts/feishu_doc.py create-and-write --title "文�
 python3 skills/feishu-docs/scripts/feishu_doc.py create-and-write --title "文档标题" --markdown-file /path/to/content.md
 ```
 
+可选参数：
+- `--folder TOKEN` — 指定目标文件夹 token
+- `--add-member ou_xxx` — 创建文档后自动添加协作者（在写入内容前执行）
+- `--member-perm full_access|edit|view` — 协作者权限（默认 full_access，需配合 `--add-member` 使用）
+- `--resume-from N` — 断点续传，从第 N 个 chunk 继续写入（0-based）
+
 ### 向已有文档追加内容
 
 ```bash
@@ -170,6 +195,10 @@ python3 skills/feishu-docs/scripts/feishu_doc.py write --doc DOC_ID --markdown "
 ```bash
 python3 skills/feishu-docs/scripts/feishu_doc.py write --doc DOC_ID --markdown-file /path/to/content.md
 ```
+
+可选参数：
+- `--mode append|overwrite` — 写入模式（默认 append 追加）
+- `--resume-from N` — 断点续传，从第 N 个 chunk 继续写入（0-based，写入失败时 stderr 会提示具体值）
 
 ### ⚠️ 覆盖写入（慎用）
 
@@ -326,6 +355,19 @@ python3 feishu_doc.py resolve-comment --doc DOC_ID --comment COMMENT_ID
 ```bash
 python3 skills/feishu-docs/scripts/feishu_doc.py --app lab create --title "测试"
 ```
+
+### 大文档写入建议
+
+- 脚本会**自动分段写入**（按安全边界拆分为 chunk），每段间有延迟，进度输出到 stderr
+- 建议 exec 设置 `timeout=600`（exec 工具支持手动指定超时，最大 600s）
+- 含 20+ 表格的超大文档，总耗时可能超过 10 分钟，建议使用 **subagent** 执行
+- 写入失败时，stderr 会输出断点续传命令提示，使用 `--resume-from N` 从失败位置继续
+- 示例：
+  ```bash
+  # stderr 输出: ERROR: Failed at chunk 8/12. Resume with: --resume-from 8
+  # 续传命令:
+  python3 feishu_doc.py write --doc DOC_ID --markdown-file /tmp/content.md --resume-from 8
+  ```
 
 ## 安全说明
 
