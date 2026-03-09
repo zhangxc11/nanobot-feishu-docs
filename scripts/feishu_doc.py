@@ -813,8 +813,33 @@ def _read_blocks(client, doc_id: str) -> int:
     # Serialize blocks to JSON-friendly format
     blocks_data = []
     if response.data and response.data.items:
+        # Build a lookup from block_id → block dict for parent-child resolution
+        all_block_dicts = {}
         for block in response.data.items:
-            blocks_data.append(_block_to_dict(block))
+            bd = _block_to_dict(block)
+            all_block_dicts[bd["block_id"]] = bd
+
+        # For table blocks, attach cell content by resolving children recursively
+        for bid, bd in all_block_dicts.items():
+            if bd.get("block_type") == 31 and "table" in bd:
+                cell_ids = bd["table"].get("cells", [])
+                cell_contents = []
+                for cell_id in cell_ids:
+                    cell_block = all_block_dicts.get(cell_id)
+                    if cell_block and cell_block.get("children"):
+                        # Collect text from child blocks of the cell
+                        cell_text_parts = []
+                        for child_id in cell_block["children"]:
+                            child_block = all_block_dicts.get(child_id)
+                            if child_block and "content" in child_block:
+                                cell_text_parts.append(child_block["content"])
+                        cell_contents.append("".join(cell_text_parts))
+                    else:
+                        cell_contents.append("")
+                bd["table"]["cell_contents"] = cell_contents
+
+        for block in response.data.items:
+            blocks_data.append(all_block_dicts[block.block_id])
 
     result = {
         "success": True,
@@ -989,6 +1014,21 @@ def _block_to_dict(block) -> dict:
                 if hasattr(elem, 'text_run') and elem.text_run:
                     content_parts.append(elem.text_run.content or "")
             result["content"] = "".join(content_parts)
+
+    # Handle table block (block_type=31)
+    if block.block_type == 31:
+        table_obj = getattr(block, 'table', None)
+        if table_obj:
+            table_info = {}
+            prop = getattr(table_obj, 'property', None)
+            if prop:
+                table_info["row_size"] = getattr(prop, 'row_size', None)
+                table_info["column_size"] = getattr(prop, 'column_size', None)
+                table_info["header_row"] = getattr(prop, 'header_row', None)
+            cells = getattr(table_obj, 'cells', None)
+            if cells:
+                table_info["cells"] = list(cells)
+            result["table"] = table_info
 
     return result
 
