@@ -532,58 +532,130 @@ CODE_LANGUAGES = {
 }
 
 
-# ── Nested list flattening helper ─────────────────────────────────────
+# ── Nested list helper (parent-child block nesting) ──────────────────
+
+def _get_indent_level(line: str) -> int:
+    """Calculate the indentation level of a line.
+
+    Each 2 spaces or 1 tab counts as one indent level.
+    Returns 0 for top-level items.
+    """
+    spaces = 0
+    for ch in line:
+        if ch == ' ':
+            spaces += 1
+        elif ch == '\t':
+            spaces += 2  # treat tab as 2 spaces
+        else:
+            break
+    return spaces // 2
+
 
 def _is_list_item(line: str) -> Optional[tuple]:
     """Check if a line is a list item (possibly indented).
 
-    Returns (block_type, content) if it is, or None otherwise.
+    Returns (block_type, content, indent_level) if it is, or None otherwise.
     Handles both bullet (- * +) and ordered (1.) list items at any indent level.
     """
-    m = re.match(r'^\s*[-*+]\s+(.+)$', line)
+    m = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
     if m:
-        return (BLOCK_TYPE_BULLET, m.group(1).strip())
-    m = re.match(r'^\s*\d+\.\s+(.+)$', line)
+        indent = _get_indent_level(line)
+        return (BLOCK_TYPE_BULLET, m.group(2).strip(), indent)
+    m = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
     if m:
-        return (BLOCK_TYPE_ORDERED, m.group(1).strip())
+        indent = _get_indent_level(line)
+        return (BLOCK_TYPE_ORDERED, m.group(2).strip(), indent)
     return None
 
 
-def _collect_flat_list_items(lines: List[str], i: int) -> tuple:
-    """Collect a list item and all its indented sub-items, flattening them.
+def _collect_nested_list_items(lines: List[str], i: int) -> tuple:
+    """Collect a list item and all its indented sub-items as a nested tree.
 
-    飞书 API 不支持嵌套列表的 children 字段，因此所有缩进子项都扁平化为
-    同级 block。子项保留其原始 block_type（bullet/ordered）。
+    飞书 API 通过 Block 父子嵌套关系实现列表缩进。子列表 Block 放在父列表
+    Block 的 "children" 数组中，飞书会自动根据层级渲染缩进效果。
+
+    Output format example for "- A\\n  - A.1\\n  - A.2":
+    {
+        "block_type": 12,
+        "bullet": {"elements": [...]},
+        "children": [
+            {"block_type": 12, "bullet": {"elements": [...]}},
+            {"block_type": 12, "bullet": {"elements": [...]}}
+        ]
+    }
 
     Args:
         lines: All document lines
         i: Current line index (pointing at the top-level list item)
 
     Returns:
-        (blocks, next_i) where blocks is a flat list of block dicts
+        (blocks, next_i) where blocks is a list of top-level block dicts
+        (each may contain nested "children")
     """
-    blocks = []
+    # First, collect all list items with their indent levels
+    items = []  # [(block_type, content, indent_level), ...]
     line = lines[i]
     info = _is_list_item(line)
     if not info:
-        return blocks, i
-    block_type, content = info
-    blocks.append(_make_text_block(block_type, content))
+        return [], i
+    base_indent = info[2]
+    items.append(info)
     i += 1
 
-    # Collect indented sub-items (any line that starts with whitespace + list marker)
     while i < len(lines):
         sub_info = _is_list_item(lines[i])
         if sub_info is None:
             break
-        # Must be indented (starts with space/tab) to be a sub-item
-        if not lines[i][0].isspace():
+        sub_type, sub_content, sub_indent = sub_info
+        # Must be same or deeper indent to be part of this list group
+        if sub_indent < base_indent:
             break
-        sub_type, sub_content = sub_info
-        blocks.append(_make_text_block(sub_type, sub_content))
+        items.append(sub_info)
         i += 1
 
+    # Build a nested tree from the flat list of (type, content, indent) tuples
+    blocks = _build_list_tree(items, base_indent)
     return blocks, i
+
+
+def _build_list_tree(items: List[tuple], base_indent: int) -> List[Dict[str, Any]]:
+    """Build a nested block tree from a flat list of (block_type, content, indent) items.
+
+    Items at base_indent become top-level blocks. Items with deeper indent become
+    children of the preceding block at a shallower indent level.
+
+    Args:
+        items: List of (block_type, content, indent_level) tuples
+        base_indent: The indent level of top-level items
+
+    Returns:
+        List of block dicts, each potentially containing a "children" key
+    """
+    if not items:
+        return []
+
+    result = []
+    idx = 0
+
+    while idx < len(items):
+        block_type, content, indent = items[idx]
+        block = _make_text_block(block_type, content)
+        idx += 1
+
+        # Collect all subsequent items with deeper indent as children
+        child_items = []
+        while idx < len(items) and items[idx][2] > indent:
+            child_items.append(items[idx])
+            idx += 1
+
+        if child_items:
+            # Recursively build children tree
+            child_indent = child_items[0][2]
+            block["children"] = _build_list_tree(child_items, child_indent)
+
+        result.append(block)
+
+    return result
 
 
 # ── Main parser ───────────────────────────────────────────────────────
@@ -706,18 +778,18 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        # ── Unordered list: - item or * item (with nested sub-items flattened) ──
+        # ── Unordered list: - item or * item (with nested sub-items) ──
         bullet_match = re.match(r'^[-*+]\s+(.+)$', line)
         if bullet_match:
-            flat_blocks, i = _collect_flat_list_items(lines, i)
-            blocks.extend(flat_blocks)
+            nested_blocks, i = _collect_nested_list_items(lines, i)
+            blocks.extend(nested_blocks)
             continue
 
-        # ── Ordered list: 1. item (with nested sub-items flattened) ──
+        # ── Ordered list: 1. item (with nested sub-items) ──
         ordered_match = re.match(r'^\d+\.\s+(.+)$', line)
         if ordered_match:
-            flat_blocks, i = _collect_flat_list_items(lines, i)
-            blocks.extend(flat_blocks)
+            nested_blocks, i = _collect_nested_list_items(lines, i)
+            blocks.extend(nested_blocks)
             continue
 
         # ── Quote: > text ──

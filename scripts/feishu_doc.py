@@ -408,19 +408,33 @@ def _split_into_chunks(block_dicts: list) -> list:
 
 
 def _write_regular_blocks(client, doc_id: str, block_dicts: list) -> int:
-    """Write regular (non-table) blocks to document. Returns count written or -1 on error."""
+    """Write regular (non-table) blocks to document. Returns count written or -1 on error.
+
+    Supports nested blocks: if any block dict has a "children" key, the entire
+    batch is written using the descendant API which supports parent-child block
+    nesting for list indentation. Otherwise uses the simpler children API.
+    """
+    # Check if any blocks have nested children
+    has_nested = any(_has_nested_children(bd) for bd in block_dicts)
+
+    if has_nested:
+        return _write_nested_blocks(client, doc_id, block_dicts)
+    else:
+        return _write_flat_blocks(client, doc_id, block_dicts)
+
+
+def _has_nested_children(bd: dict) -> bool:
+    """Check if a block dict or any of its descendants has nested children."""
+    if "children" in bd and bd["children"]:
+        return True
+    return False
+
+
+def _write_flat_blocks(client, doc_id: str, block_dicts: list) -> int:
+    """Write flat (non-nested) blocks using the children API."""
     children = []
     for bd in block_dicts:
-        block = Block()
-        block.block_type = bd["block_type"]
-
-        for field_name in ["text", "heading1", "heading2", "heading3", "heading4",
-                           "heading5", "heading6", "heading7", "heading8", "heading9",
-                           "bullet", "ordered", "code", "quote", "todo", "divider"]:
-            if field_name in bd:
-                setattr(block, field_name, _dict_to_text(bd[field_name], field_name))
-                break
-
+        block = _dict_to_block_simple(bd)
         children.append(block)
 
     BATCH_SIZE = 50
@@ -453,6 +467,99 @@ def _write_regular_blocks(client, doc_id: str, block_dicts: list) -> int:
         total_written += len(batch)
 
     return total_written
+
+
+def _write_nested_blocks(client, doc_id: str, block_dicts: list) -> int:
+    """Write blocks with nested children using the descendant API.
+
+    The descendant API (POST .../blocks/:block_id/descendant) accepts:
+    - children_id: list of block IDs that are direct children of the parent
+    - descendants: flat list of ALL blocks with custom block_ids
+    - Each block's children field contains IDs of its child blocks
+
+    This enables proper list indentation through parent-child relationships.
+    """
+    # Flatten the nested tree into a flat list with ID references
+    counter = [0]  # mutable counter for generating unique IDs
+    top_level_ids = []
+    all_descendants = []
+
+    for bd in block_dicts:
+        block_id = _flatten_block_tree(bd, counter, all_descendants)
+        top_level_ids.append(block_id)
+
+    # Convert all descendants to SDK Block objects with block_id and children as string IDs
+    sdk_blocks = []
+    for desc in all_descendants:
+        block = _dict_to_block_simple(desc)
+        block.block_id = desc["_id"]
+        if "_child_ids" in desc and desc["_child_ids"]:
+            block.children = desc["_child_ids"]
+        sdk_blocks.append(block)
+
+    # Use descendant API
+    request = CreateDocumentBlockDescendantRequest.builder() \
+        .document_id(doc_id) \
+        .block_id(doc_id) \
+        .request_body(
+            CreateDocumentBlockDescendantRequestBody.builder()
+            .children_id(top_level_ids)
+            .index(-1)
+            .descendants(sdk_blocks)
+            .build()
+        ) \
+        .build()
+
+    response = client.docx.v1.document_block_descendant.create(request)
+
+    if not response.success():
+        print(json.dumps({
+            "success": False,
+            "error": f"[{response.code}] {response.msg}",
+            "blocks_written": 0
+        }, ensure_ascii=False))
+        return -1
+
+    return len(block_dicts)
+
+
+def _flatten_block_tree(bd: dict, counter: list, result: list) -> str:
+    """Flatten a nested block dict tree into a flat list with ID references.
+
+    Each block gets a unique _id and _child_ids fields.
+    Returns the block_id of this block.
+    """
+    counter[0] += 1
+    block_id = f"blk_{counter[0]}"
+
+    child_ids = []
+    if "children" in bd and bd["children"]:
+        for child_bd in bd["children"]:
+            child_id = _flatten_block_tree(child_bd, counter, result)
+            child_ids.append(child_id)
+
+    # Create a copy without the nested "children" key, add _id and _child_ids
+    flat_bd = {k: v for k, v in bd.items() if k != "children"}
+    flat_bd["_id"] = block_id
+    flat_bd["_child_ids"] = child_ids
+
+    result.append(flat_bd)
+    return block_id
+
+
+def _dict_to_block_simple(bd: dict) -> "Block":
+    """Convert a block dict (without nested children) to a lark-oapi Block object."""
+    block = Block()
+    block.block_type = bd["block_type"]
+
+    for field_name in ["text", "heading1", "heading2", "heading3", "heading4",
+                       "heading5", "heading6", "heading7", "heading8", "heading9",
+                       "bullet", "ordered", "code", "quote", "todo", "divider"]:
+        if field_name in bd:
+            setattr(block, field_name, _dict_to_text(bd[field_name], field_name))
+            break
+
+    return block
 
 
 def _write_table_block(client, doc_id: str, table_dict: dict, index: int = -1) -> bool:
