@@ -302,27 +302,33 @@ def _write_blocks_to_doc(client, doc_id: str, block_dicts: list,
                 if table_written:
                     time.sleep(3)
             else:
-                # P1-1: Regular chunk delay — 1s between non-first chunks
-                # (only if we actually wrote something before)
+                # F9.3: Reduced from 1s to 0.5s to speed up large document writes
                 if total_written > 0 or table_written:
-                    time.sleep(1)
+                    time.sleep(0.5)
 
         # Write the chunk
         if chunk_type == "regular":
             count = _write_regular_blocks(client, doc_id, chunk_data)
             if count < 0:
-                # P1-3: Output resume hint on failure
+                # F9.4: Improved resume hint — warn about potential duplication
+                # from partial writes. Suggest checking the document.
                 print(f"ERROR: Failed at chunk {chunk_idx + 1}/{total_chunks}. "
-                      f"Resume with: --resume-from {chunk_idx}",
+                      f"Blocks written before failure: {total_written}. "
+                      f"Resume with: --resume-from {chunk_idx + 1} "
+                      f"(skip failed chunk) or --resume-from {chunk_idx} "
+                      f"(retry failed chunk — check doc for duplicates first)",
                       file=sys.stderr)
                 return 1
             total_written += count
         elif chunk_type == "table":
             ok = _write_table_block(client, doc_id, chunk_data)
             if not ok:
-                # P1-3: Output resume hint on failure
-                print(f"ERROR: Failed at chunk {chunk_idx + 1}/{total_chunks}. "
-                      f"Resume with: --resume-from {chunk_idx}",
+                # F9.4: Improved resume hint
+                print(f"ERROR: Failed at table chunk {chunk_idx + 1}/{total_chunks}. "
+                      f"Blocks written before failure: {total_written}. "
+                      f"Resume with: --resume-from {chunk_idx + 1} "
+                      f"(skip failed chunk) or --resume-from {chunk_idx} "
+                      f"(retry failed chunk — check doc for duplicates first)",
                       file=sys.stderr)
                 return 1
             total_written += 1
@@ -336,6 +342,7 @@ def _write_blocks_to_doc(client, doc_id: str, block_dicts: list,
         "success": True,
         "document_id": doc_id,
         "blocks_written": total_written,
+        "total_chunks": total_chunks,
         "url": f"https://feishu.cn/docx/{doc_id}"
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -344,7 +351,9 @@ def _write_blocks_to_doc(client, doc_id: str, block_dicts: list,
 
 # ── Chunk size constants ──────────────────────────────────────────────
 
-CHUNK_MAX_BLOCKS = 30   # Max regular blocks per chunk
+# F9.3: Increased from 30 to 50 to reduce chunk count and inter-chunk delays
+# for large documents. Matches the BATCH_SIZE in _write_regular_blocks.
+CHUNK_MAX_BLOCKS = 50   # Max regular blocks per chunk
 CHUNK_DELAY = 1         # Seconds between regular chunks
 TABLE_DELAY = 3         # Seconds between table chunks (P0-3 compatible)
 

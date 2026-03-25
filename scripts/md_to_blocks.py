@@ -174,7 +174,14 @@ def _parse_inline_simple(text: str) -> List[Dict[str, Any]]:
             elements.append(_make_text_run(text[pos:m.start()]))
 
         if m.group(1):  # link
-            elements.append(_make_text_run(m.group(2), link_url=m.group(3)))
+            link_url = m.group(3)
+            link_text = m.group(2)
+            # F9.2: Degrade anchor links (#xxx) to plain text — Feishu API
+            # does not support in-document anchor links and rejects them.
+            if link_url.startswith('#'):
+                elements.append(_make_text_run(link_text))
+            else:
+                elements.append(_make_text_run(link_text, link_url=link_url))
         elif m.group(4):  # bold
             elements.append(_make_text_run(m.group(5), bold=True))
         elif m.group(6):  # strikethrough
@@ -525,6 +532,60 @@ CODE_LANGUAGES = {
 }
 
 
+# ── Nested list flattening helper ─────────────────────────────────────
+
+def _is_list_item(line: str) -> Optional[tuple]:
+    """Check if a line is a list item (possibly indented).
+
+    Returns (block_type, content) if it is, or None otherwise.
+    Handles both bullet (- * +) and ordered (1.) list items at any indent level.
+    """
+    m = re.match(r'^\s*[-*+]\s+(.+)$', line)
+    if m:
+        return (BLOCK_TYPE_BULLET, m.group(1).strip())
+    m = re.match(r'^\s*\d+\.\s+(.+)$', line)
+    if m:
+        return (BLOCK_TYPE_ORDERED, m.group(1).strip())
+    return None
+
+
+def _collect_flat_list_items(lines: List[str], i: int) -> tuple:
+    """Collect a list item and all its indented sub-items, flattening them.
+
+    飞书 API 不支持嵌套列表的 children 字段，因此所有缩进子项都扁平化为
+    同级 block。子项保留其原始 block_type（bullet/ordered）。
+
+    Args:
+        lines: All document lines
+        i: Current line index (pointing at the top-level list item)
+
+    Returns:
+        (blocks, next_i) where blocks is a flat list of block dicts
+    """
+    blocks = []
+    line = lines[i]
+    info = _is_list_item(line)
+    if not info:
+        return blocks, i
+    block_type, content = info
+    blocks.append(_make_text_block(block_type, content))
+    i += 1
+
+    # Collect indented sub-items (any line that starts with whitespace + list marker)
+    while i < len(lines):
+        sub_info = _is_list_item(lines[i])
+        if sub_info is None:
+            break
+        # Must be indented (starts with space/tab) to be a sub-item
+        if not lines[i][0].isspace():
+            break
+        sub_type, sub_content = sub_info
+        blocks.append(_make_text_block(sub_type, sub_content))
+        i += 1
+
+    return blocks, i
+
+
 # ── Main parser ───────────────────────────────────────────────────────
 
 def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
@@ -563,11 +624,11 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
                         next_line.strip()
                         and not next_line.strip().startswith('#')
                         and not next_line.strip().startswith('```')
-                        and not re.match(r'^[-*+]\s', next_line)
-                        and not re.match(r'^\d+\.\s', next_line)
+                        and not re.match(r'^\s*[-*+]\s', next_line)
+                        and not re.match(r'^\s*\d+\.\s', next_line)
                         and not next_line.startswith('>')
                         and not re.match(r'^(\s*[-*_]\s*){3,}$', next_line)
-                        and not re.match(r'^[-*]\s+\[[ xX]\]', next_line)
+                        and not re.match(r'^\s*[-*]\s+\[[ xX]\]', next_line)
                     )
                     if is_next_paragraph:
                         blocks.append(_make_text_block(BLOCK_TYPE_TEXT, ""))
@@ -636,8 +697,8 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        # ── Todo: - [ ] or - [x] ──
-        todo_match = re.match(r'^[-*]\s+\[([ xX])\]\s+(.+)$', line)
+        # ── Todo: - [ ] or - [x] (at any indent level) ──
+        todo_match = re.match(r'^\s*[-*]\s+\[([ xX])\]\s+(.+)$', line)
         if todo_match:
             done = todo_match.group(1).lower() == 'x'
             content = todo_match.group(2).strip()
@@ -645,20 +706,18 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        # ── Unordered list: - item or * item ──
+        # ── Unordered list: - item or * item (with nested sub-items flattened) ──
         bullet_match = re.match(r'^[-*+]\s+(.+)$', line)
         if bullet_match:
-            content = bullet_match.group(1).strip()
-            blocks.append(_make_text_block(BLOCK_TYPE_BULLET, content))
-            i += 1
+            flat_blocks, i = _collect_flat_list_items(lines, i)
+            blocks.extend(flat_blocks)
             continue
 
-        # ── Ordered list: 1. item ──
+        # ── Ordered list: 1. item (with nested sub-items flattened) ──
         ordered_match = re.match(r'^\d+\.\s+(.+)$', line)
         if ordered_match:
-            content = ordered_match.group(1).strip()
-            blocks.append(_make_text_block(BLOCK_TYPE_ORDERED, content))
-            i += 1
+            flat_blocks, i = _collect_flat_list_items(lines, i)
+            blocks.extend(flat_blocks)
             continue
 
         # ── Quote: > text ──
@@ -672,21 +731,30 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             blocks.append(_make_text_block(BLOCK_TYPE_QUOTE, content))
             continue
 
+        # ── F9.5: Full-line bold text → standalone text block ──
+        # Lines like "**方案 2: 后台执行**" act as pseudo-headings.
+        # Emit as a standalone block to prevent paragraph merging.
+        if re.match(r'^\*\*(.+)\*\*$', line.strip()):
+            blocks.append(_make_text_block(BLOCK_TYPE_TEXT, line.strip()))
+            i += 1
+            continue
+
         # ── Regular paragraph ──
         # Collect consecutive non-empty, non-special lines as one paragraph
         para_lines = [line]
         i += 1
         while i < len(lines):
             next_line = lines[i]
-            # Stop at blank line or special syntax
+            # Stop at blank line or special syntax (including indented list items)
             if (not next_line.strip() or
                 next_line.strip().startswith('#') or
                 next_line.strip().startswith('```') or
-                re.match(r'^[-*+]\s', next_line) or
-                re.match(r'^\d+\.\s', next_line) or
+                re.match(r'^\s*[-*+]\s', next_line) or
+                re.match(r'^\s*\d+\.\s', next_line) or
                 next_line.startswith('>') or
                 re.match(r'^(\s*[-*_]\s*){3,}$', next_line) or
-                re.match(r'^[-*]\s+\[[ xX]\]', next_line)):
+                re.match(r'^\s*[-*]\s+\[[ xX]\]', next_line) or
+                re.match(r'^\*\*(.+)\*\*$', next_line.strip())):  # F9.5: stop at full-line bold
                 break
             para_lines.append(next_line)
             i += 1
