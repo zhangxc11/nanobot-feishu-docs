@@ -656,5 +656,190 @@ class TestNestedCodeBlocks(unittest.TestCase):
         self.assertIn(BLOCK_TYPE_HEADING1, types)
 
 
+# ── F9.1: Nested list flattening ─────────────────────────────────────
+
+class TestNestedListFlattening(unittest.TestCase):
+    """F9.1: Nested lists should be flattened (no children field)."""
+
+    def test_simple_nested_bullet(self):
+        """Indented sub-items become flat bullet blocks."""
+        md = "- Parent\n  - Child A\n  - Child B"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 3)
+        for b in blocks:
+            self.assertEqual(b["block_type"], BLOCK_TYPE_BULLET)
+            self.assertNotIn("children", b)
+        self.assertEqual(blocks[0]["bullet"]["elements"][0]["text_run"]["content"], "Parent")
+        self.assertEqual(blocks[1]["bullet"]["elements"][0]["text_run"]["content"], "Child A")
+        self.assertEqual(blocks[2]["bullet"]["elements"][0]["text_run"]["content"], "Child B")
+
+    def test_deeply_nested_bullet(self):
+        """3-level nesting all flattened."""
+        md = "- L1\n  - L2\n    - L3"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 3)
+        for b in blocks:
+            self.assertEqual(b["block_type"], BLOCK_TYPE_BULLET)
+            self.assertNotIn("children", b)
+
+    def test_mixed_ordered_bullet_nesting(self):
+        """Ordered top-level with bullet sub-items preserves types."""
+        md = "1. First\n   - Nested bullet\n2. Second"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 3)
+        self.assertEqual(blocks[0]["block_type"], BLOCK_TYPE_ORDERED)
+        self.assertEqual(blocks[1]["block_type"], BLOCK_TYPE_BULLET)
+        self.assertEqual(blocks[2]["block_type"], BLOCK_TYPE_ORDERED)
+
+    def test_flat_list_unchanged(self):
+        """Flat lists (no nesting) still work correctly."""
+        md = "- A\n- B\n- C"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 3)
+        for b in blocks:
+            self.assertEqual(b["block_type"], BLOCK_TYPE_BULLET)
+
+    def test_nested_list_with_bold(self):
+        """Nested list items with inline formatting."""
+        md = "- **Parent**\n  - Child with `code`"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 2)
+        # Parent should have bold
+        parent_els = blocks[0]["bullet"]["elements"]
+        self.assertTrue(parent_els[0]["text_run"]["text_element_style"].get("bold"))
+        # Child should have code
+        child_els = blocks[1]["bullet"]["elements"]
+        code_found = any(
+            e["text_run"]["text_element_style"].get("inline_code")
+            for e in child_els
+        )
+        self.assertTrue(code_found)
+
+    def test_toc_style_nested_list(self):
+        """Real-world TOC-style nested list from requirement."""
+        md = ("- **API 统一汇聚**：\n"
+              "  - 主模型 API\n"
+              "  - 各 Skill 背后提供服务的 API\n"
+              "- **推广落地**：\n"
+              "  - 面向商汤下游客户广泛推广使用")
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 5)
+        for b in blocks:
+            self.assertEqual(b["block_type"], BLOCK_TYPE_BULLET)
+            self.assertNotIn("children", b)
+
+
+# ── F9.2: Anchor link degradation ────────────────────────────────────
+
+class TestAnchorLinkDegradation(unittest.TestCase):
+    """F9.2: Anchor links (#xxx) should be degraded to plain text."""
+
+    def test_anchor_link_becomes_plain_text(self):
+        """[text](#anchor) → plain text 'text'."""
+        md = "[Section 1](#section-1)"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+        elements = blocks[0]["text"]["elements"]
+        # Should be plain text, no link
+        text_content = elements[0]["text_run"]["content"]
+        self.assertEqual(text_content, "Section 1")
+        self.assertNotIn("link", elements[0]["text_run"]["text_element_style"])
+
+    def test_normal_link_preserved(self):
+        """Normal links should still work."""
+        md = "[Google](https://google.com)"
+        blocks = markdown_to_blocks(md)
+        elements = blocks[0]["text"]["elements"]
+        style = elements[0]["text_run"]["text_element_style"]
+        self.assertIn("link", style)
+        self.assertEqual(style["link"]["url"], "https://google.com")
+
+    def test_mixed_anchor_and_normal_links(self):
+        """Anchor links degraded, normal links preserved in same line."""
+        md = "[anchor](#top) and [link](https://example.com)"
+        blocks = markdown_to_blocks(md)
+        elements = blocks[0]["text"]["elements"]
+        # Find the anchor text (should have no link)
+        anchor_el = elements[0]  # "anchor"
+        self.assertEqual(anchor_el["text_run"]["content"], "anchor")
+        self.assertNotIn("link", anchor_el["text_run"]["text_element_style"])
+        # Find the normal link (should have link)
+        link_el = elements[2]  # "link"
+        self.assertEqual(link_el["text_run"]["content"], "link")
+        self.assertIn("link", link_el["text_run"]["text_element_style"])
+
+    def test_anchor_in_list_item(self):
+        """Anchor links in list items also degraded."""
+        md = "- See [details](#details)"
+        blocks = markdown_to_blocks(md)
+        elements = blocks[0]["bullet"]["elements"]
+        # "See " + "details" (no link)
+        for el in elements:
+            self.assertNotIn("link", el["text_run"]["text_element_style"])
+
+
+# ── F9.5: Full-line bold standalone block ─────────────────────────────
+
+class TestFullLineBoldStandalone(unittest.TestCase):
+    """F9.5: Full-line bold text should be a standalone block."""
+
+    def test_bold_line_not_merged_with_next(self):
+        """**title** followed by text should be 2 separate blocks."""
+        md = "**方案 2: 后台执行**\n这是描述内容。"
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 2)
+        # First block: bold title
+        b0_els = blocks[0]["text"]["elements"]
+        self.assertTrue(b0_els[0]["text_run"]["text_element_style"].get("bold"))
+        self.assertEqual(b0_els[0]["text_run"]["content"], "方案 2: 后台执行")
+        # Second block: description
+        b1_els = blocks[1]["text"]["elements"]
+        self.assertEqual(b1_els[0]["text_run"]["content"], "这是描述内容。")
+
+    def test_multiple_bold_titles(self):
+        """Multiple bold title + description pairs."""
+        md = "**Title A**\nDesc A\n\n**Title B**\nDesc B"
+        blocks = markdown_to_blocks(md)
+        # Should be: bold, text, empty, bold, text
+        bold_blocks = [b for b in blocks
+                       if b.get("text", {}).get("elements", [{}])[0]
+                       .get("text_run", {}).get("text_element_style", {}).get("bold")]
+        self.assertEqual(len(bold_blocks), 2)
+
+    def test_inline_bold_not_separated(self):
+        """Bold within a line should NOT trigger separation."""
+        md = "This has **some bold** in the middle."
+        blocks = markdown_to_blocks(md)
+        self.assertEqual(len(blocks), 1)
+
+    def test_bold_line_with_blank_before(self):
+        """Bold line after blank line is standalone."""
+        md = "Paragraph before.\n\n**Bold Title**\nDescription after."
+        blocks = markdown_to_blocks(md)
+        # Find the bold block
+        bold_found = False
+        for b in blocks:
+            els = b.get("text", {}).get("elements", [])
+            if els and els[0].get("text_run", {}).get("text_element_style", {}).get("bold"):
+                content = els[0]["text_run"]["content"]
+                self.assertEqual(content, "Bold Title")
+                bold_found = True
+        self.assertTrue(bold_found)
+
+    def test_paragraph_stops_at_bold_line(self):
+        """Paragraph collector should stop when encountering a full-line bold."""
+        md = "Normal text line\n**Bold Title**\nMore text"
+        blocks = markdown_to_blocks(md)
+        # Should be 3 blocks: text, bold, text
+        self.assertEqual(len(blocks), 3)
+        self.assertEqual(
+            blocks[0]["text"]["elements"][0]["text_run"]["content"],
+            "Normal text line"
+        )
+        self.assertTrue(
+            blocks[1]["text"]["elements"][0]["text_run"]["text_element_style"].get("bold")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

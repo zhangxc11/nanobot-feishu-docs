@@ -174,7 +174,14 @@ def _parse_inline_simple(text: str) -> List[Dict[str, Any]]:
             elements.append(_make_text_run(text[pos:m.start()]))
 
         if m.group(1):  # link
-            elements.append(_make_text_run(m.group(2), link_url=m.group(3)))
+            link_url = m.group(3)
+            link_text = m.group(2)
+            # F9.2: Degrade anchor links (#xxx) to plain text — Feishu API
+            # does not support in-document anchor links and rejects them.
+            if link_url.startswith('#'):
+                elements.append(_make_text_run(link_text))
+            else:
+                elements.append(_make_text_run(link_text, link_url=link_url))
         elif m.group(4):  # bold
             elements.append(_make_text_run(m.group(5), bold=True))
         elif m.group(6):  # strikethrough
@@ -525,6 +532,132 @@ CODE_LANGUAGES = {
 }
 
 
+# ── Nested list helper (parent-child block nesting) ──────────────────
+
+def _get_indent_level(line: str) -> int:
+    """Calculate the indentation level of a line.
+
+    Each 2 spaces or 1 tab counts as one indent level.
+    Returns 0 for top-level items.
+    """
+    spaces = 0
+    for ch in line:
+        if ch == ' ':
+            spaces += 1
+        elif ch == '\t':
+            spaces += 2  # treat tab as 2 spaces
+        else:
+            break
+    return spaces // 2
+
+
+def _is_list_item(line: str) -> Optional[tuple]:
+    """Check if a line is a list item (possibly indented).
+
+    Returns (block_type, content, indent_level) if it is, or None otherwise.
+    Handles both bullet (- * +) and ordered (1.) list items at any indent level.
+    """
+    m = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
+    if m:
+        indent = _get_indent_level(line)
+        return (BLOCK_TYPE_BULLET, m.group(2).strip(), indent)
+    m = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
+    if m:
+        indent = _get_indent_level(line)
+        return (BLOCK_TYPE_ORDERED, m.group(2).strip(), indent)
+    return None
+
+
+def _collect_nested_list_items(lines: List[str], i: int) -> tuple:
+    """Collect a list item and all its indented sub-items as a nested tree.
+
+    飞书 API 通过 Block 父子嵌套关系实现列表缩进。子列表 Block 放在父列表
+    Block 的 "children" 数组中，飞书会自动根据层级渲染缩进效果。
+
+    Output format example for "- A\\n  - A.1\\n  - A.2":
+    {
+        "block_type": 12,
+        "bullet": {"elements": [...]},
+        "children": [
+            {"block_type": 12, "bullet": {"elements": [...]}},
+            {"block_type": 12, "bullet": {"elements": [...]}}
+        ]
+    }
+
+    Args:
+        lines: All document lines
+        i: Current line index (pointing at the top-level list item)
+
+    Returns:
+        (blocks, next_i) where blocks is a list of top-level block dicts
+        (each may contain nested "children")
+    """
+    # First, collect all list items with their indent levels
+    items = []  # [(block_type, content, indent_level), ...]
+    line = lines[i]
+    info = _is_list_item(line)
+    if not info:
+        return [], i
+    base_indent = info[2]
+    items.append(info)
+    i += 1
+
+    while i < len(lines):
+        sub_info = _is_list_item(lines[i])
+        if sub_info is None:
+            break
+        sub_type, sub_content, sub_indent = sub_info
+        # Must be same or deeper indent to be part of this list group
+        if sub_indent < base_indent:
+            break
+        items.append(sub_info)
+        i += 1
+
+    # Build a nested tree from the flat list of (type, content, indent) tuples
+    blocks = _build_list_tree(items, base_indent)
+    return blocks, i
+
+
+def _build_list_tree(items: List[tuple], base_indent: int) -> List[Dict[str, Any]]:
+    """Build a nested block tree from a flat list of (block_type, content, indent) items.
+
+    Items at base_indent become top-level blocks. Items with deeper indent become
+    children of the preceding block at a shallower indent level.
+
+    Args:
+        items: List of (block_type, content, indent_level) tuples
+        base_indent: The indent level of top-level items
+
+    Returns:
+        List of block dicts, each potentially containing a "children" key
+    """
+    if not items:
+        return []
+
+    result = []
+    idx = 0
+
+    while idx < len(items):
+        block_type, content, indent = items[idx]
+        block = _make_text_block(block_type, content)
+        idx += 1
+
+        # Collect all subsequent items with deeper indent as children
+        child_items = []
+        while idx < len(items) and items[idx][2] > indent:
+            child_items.append(items[idx])
+            idx += 1
+
+        if child_items:
+            # Recursively build children tree
+            child_indent = child_items[0][2]
+            block["children"] = _build_list_tree(child_items, child_indent)
+
+        result.append(block)
+
+    return result
+
+
 # ── Main parser ───────────────────────────────────────────────────────
 
 def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
@@ -563,11 +696,11 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
                         next_line.strip()
                         and not next_line.strip().startswith('#')
                         and not next_line.strip().startswith('```')
-                        and not re.match(r'^[-*+]\s', next_line)
-                        and not re.match(r'^\d+\.\s', next_line)
+                        and not re.match(r'^\s*[-*+]\s', next_line)
+                        and not re.match(r'^\s*\d+\.\s', next_line)
                         and not next_line.startswith('>')
                         and not re.match(r'^(\s*[-*_]\s*){3,}$', next_line)
-                        and not re.match(r'^[-*]\s+\[[ xX]\]', next_line)
+                        and not re.match(r'^\s*[-*]\s+\[[ xX]\]', next_line)
                     )
                     if is_next_paragraph:
                         blocks.append(_make_text_block(BLOCK_TYPE_TEXT, ""))
@@ -636,8 +769,8 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        # ── Todo: - [ ] or - [x] ──
-        todo_match = re.match(r'^[-*]\s+\[([ xX])\]\s+(.+)$', line)
+        # ── Todo: - [ ] or - [x] (at any indent level) ──
+        todo_match = re.match(r'^\s*[-*]\s+\[([ xX])\]\s+(.+)$', line)
         if todo_match:
             done = todo_match.group(1).lower() == 'x'
             content = todo_match.group(2).strip()
@@ -645,20 +778,18 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        # ── Unordered list: - item or * item ──
+        # ── Unordered list: - item or * item (with nested sub-items) ──
         bullet_match = re.match(r'^[-*+]\s+(.+)$', line)
         if bullet_match:
-            content = bullet_match.group(1).strip()
-            blocks.append(_make_text_block(BLOCK_TYPE_BULLET, content))
-            i += 1
+            nested_blocks, i = _collect_nested_list_items(lines, i)
+            blocks.extend(nested_blocks)
             continue
 
-        # ── Ordered list: 1. item ──
+        # ── Ordered list: 1. item (with nested sub-items) ──
         ordered_match = re.match(r'^\d+\.\s+(.+)$', line)
         if ordered_match:
-            content = ordered_match.group(1).strip()
-            blocks.append(_make_text_block(BLOCK_TYPE_ORDERED, content))
-            i += 1
+            nested_blocks, i = _collect_nested_list_items(lines, i)
+            blocks.extend(nested_blocks)
             continue
 
         # ── Quote: > text ──
@@ -672,21 +803,30 @@ def markdown_to_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             blocks.append(_make_text_block(BLOCK_TYPE_QUOTE, content))
             continue
 
+        # ── F9.5: Full-line bold text → standalone text block ──
+        # Lines like "**方案 2: 后台执行**" act as pseudo-headings.
+        # Emit as a standalone block to prevent paragraph merging.
+        if re.match(r'^\*\*(.+)\*\*$', line.strip()):
+            blocks.append(_make_text_block(BLOCK_TYPE_TEXT, line.strip()))
+            i += 1
+            continue
+
         # ── Regular paragraph ──
         # Collect consecutive non-empty, non-special lines as one paragraph
         para_lines = [line]
         i += 1
         while i < len(lines):
             next_line = lines[i]
-            # Stop at blank line or special syntax
+            # Stop at blank line or special syntax (including indented list items)
             if (not next_line.strip() or
                 next_line.strip().startswith('#') or
                 next_line.strip().startswith('```') or
-                re.match(r'^[-*+]\s', next_line) or
-                re.match(r'^\d+\.\s', next_line) or
+                re.match(r'^\s*[-*+]\s', next_line) or
+                re.match(r'^\s*\d+\.\s', next_line) or
                 next_line.startswith('>') or
                 re.match(r'^(\s*[-*_]\s*){3,}$', next_line) or
-                re.match(r'^[-*]\s+\[[ xX]\]', next_line)):
+                re.match(r'^\s*[-*]\s+\[[ xX]\]', next_line) or
+                re.match(r'^\*\*(.+)\*\*$', next_line.strip())):  # F9.5: stop at full-line bold
                 break
             para_lines.append(next_line)
             i += 1

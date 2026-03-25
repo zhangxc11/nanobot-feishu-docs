@@ -172,7 +172,7 @@ class TestChunkedWriteAndProgress(unittest.TestCase):
     @patch('feishu_doc._write_regular_blocks')
     @patch('feishu_doc.time')
     def test_chunk_delays(self, mock_time, mock_regular, mock_table):
-        """Regular chunks get 1s delay, table chunks get 3s delay."""
+        """Regular chunks get 0.5s delay (F9.3), table chunks get 3s delay."""
         from feishu_doc import _write_blocks_to_doc
 
         mock_regular.return_value = 1
@@ -188,8 +188,8 @@ class TestChunkedWriteAndProgress(unittest.TestCase):
         # We expect some sleep calls — at minimum for the table chunk delay
         sleep_values = [c[0][0] for c in sleep_calls]
         # Between chunk 0 (text) and chunk 1 (table): no 3s delay (first table)
-        # Between chunk 1 (table) and chunk 2 (text): 1s delay
-        self.assertIn(1, sleep_values, "Should have 1s delay between regular chunks")
+        # Between chunk 1 (table) and chunk 2 (text): 0.5s delay (F9.3: reduced from 1s)
+        self.assertIn(0.5, sleep_values, "Should have 0.5s delay between regular chunks")
 
     @patch('feishu_doc._write_table_block')
     @patch('feishu_doc._write_regular_blocks')
@@ -360,7 +360,9 @@ class TestResumeFrom(unittest.TestCase):
         self.assertEqual(result, 1)
         stderr_output = captured_stderr.getvalue()
         self.assertIn("--resume-from", stderr_output)
-        self.assertIn("Failed at chunk", stderr_output)
+        self.assertIn("ERROR: Failed at", stderr_output)
+        # F9.4: Should contain both skip and retry options
+        self.assertIn("skip failed chunk", stderr_output)
 
     @patch('feishu_doc._write_table_block')
     @patch('feishu_doc._write_regular_blocks')

@@ -462,4 +462,53 @@
 
 ---
 
+## Phase 9: 飞书文档写入健壮性修复
+
+### 2026-03-25 Session: F9.1~F9.5 修复 ✅
+
+#### 任务拆解
+- [x] F9.1 嵌套列表 schema mismatch 修复
+- [x] F9.2 文档内锚点链接降级
+- [x] F9.3 大文档写入超时优化
+- [x] F9.4 续传重复修复
+- [x] F9.5 整行加粗标题格式异常修复
+- [x] 编写新测试（15 项）
+- [x] 回归测试（70 项原有测试通过）
+
+#### F9.1 嵌套列表扁平化
+- **根因**: 飞书 API 不支持嵌套列表的 `children` 字段，缩进子项落入段落收集器被合并为纯文本
+- **修复**: 新增 `_is_list_item()` 检测任意缩进的列表项，`_collect_flat_list_items()` 收集顶级项+所有缩进子项并扁平化为同级 block
+- **关键**: 子项保留原始类型（bullet/ordered），不强制统一为父项类型
+- 修改文件：`scripts/md_to_blocks.py`
+- 新增测试：6 项（TestNestedListFlattening）
+
+#### F9.2 锚点链接降级
+- **根因**: `[text](#anchor)` 格式的锚点链接在飞书 API 中不支持，导致写入失败
+- **修复**: `_parse_inline_simple()` 中检测 `link_url.startswith('#')`，降级为纯文本（保留文字，去掉链接）
+- 修改文件：`scripts/md_to_blocks.py`
+- 新增测试：4 项（TestAnchorLinkDegradation）
+
+#### F9.3 大文档超时优化
+- **修复1**: `CHUNK_MAX_BLOCKS` 从 30 增至 50（匹配 BATCH_SIZE），减少 chunk 数量
+- **修复2**: 常规 chunk 间 delay 从 1s 减至 0.5s
+- **效果**: 对于 500 block 文档，chunk 数从 ~17 降至 ~10，总延迟从 ~16s 降至 ~4.5s
+- 修改文件：`scripts/feishu_doc.py`
+
+#### F9.4 续传重复修复
+- **根因**: 失败时 resume hint 指向当前 chunk，但该 chunk 可能已部分写入（HTTP 超时但服务端已处理）
+- **修复**: 改进错误消息，提供两个 resume 选项：`--resume-from N+1`（跳过失败 chunk）和 `--resume-from N`（重试，需先检查文档）；输出 `blocks_written_before_failure` 计数
+- 修改文件：`scripts/feishu_doc.py`
+
+#### F9.5 整行加粗独立 block
+- **根因**: `**方案 2: 后台执行**` 后跟非空行时，段落收集器将两行合并为一个 block，导致格式异常
+- **修复**: 在段落收集器前检测全行加粗（`^\*\*(.+)\*\*$`），作为独立 text block 输出；段落收集器也在遇到全行加粗时停止收集
+- 修改文件：`scripts/md_to_blocks.py`
+- 新增测试：5 项（TestFullLineBoldStandalone）
+
+#### 测试结果
+- `tests/test_md_to_blocks.py`: 85/85 通过（70 旧 + 6 F9.1 + 4 F9.2 + 5 F9.5）
+- 总计: 85/85 全部通过
+
+---
+
 *开始日期: 2026-02-28*
