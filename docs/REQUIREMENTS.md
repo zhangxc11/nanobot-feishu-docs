@@ -236,6 +236,33 @@
 - 错误码 1770001（invalid param）且行数 > 9 时，额外提示"行数超限"
 - 错误码 99991400（rate limit）时，提示"触发频率限制，将自动重试"
 
+### Phase 9: 写入工具健壮性修复
+
+> TODO: 28895c39
+> 状态: 需求已对齐，待排期开发
+> 详情: [requirements/phase9-write-robustness.md](requirements/phase9-write-robustness.md)
+
+#### F9.1 嵌套列表 schema mismatch 修复
+- 目录(TOC)中的嵌套列表（缩进子项）导致 `[1770006] schema mismatch`
+- 飞书 API 不支持嵌套列表的 `children` 字段
+- `md_to_blocks.py` 转换器自动扁平化嵌套列表
+
+#### F9.2 文档内锚点链接降级
+- `[text](#anchor)` 格式的锚点链接导致写入失败
+- 转换器自动将锚点链接降级为纯文本
+
+#### F9.3 大文档写入超时优化
+- 884 行文档写入过程中 600s 超时
+- 优化 chunk 大小或并发策略；skill 文档标注大文档推荐写入方式
+
+#### F9.4 续传内容重复修复
+- 超时后续传导致文档开头出现重复内容
+- `--resume-from` 精确定位续传起点，避免重复
+
+#### F9.5 加粗标题格式异常修复
+- 整行加粗标题（如 **方案 2: 后台执行**）格式渲染异常
+- 修复 Markdown 转飞书 block 时整行加粗文本的转换逻辑
+
 ## Issues
 
 ### Bug #4: 嵌套代码块解析混乱 ✅ (已修复)
